@@ -1,5 +1,12 @@
 ![sm64coopdx Logo](textures/segment2/custom_coopdx_logo.rgba32.png)
 
+> This fork builds a port of sm64coopdx for **RK3326 handhelds running ArkOS**
+> (R36S, R36 Ultra X and clones). It uses a rebuilt CoopNet with an
+> executable-hash override so custom builds can join public lobbies, plus
+> compatibility fixes for the older glibc and GLES2 driver on these devices.
+> See [BUILDING.md](BUILDING.md) for build and install instructions. Released
+> builds are produced automatically by the `Build R36S` workflow.
+
 sm64coopdx is an online multiplayer project for the Super Mario 64 PC port that synchronizes all entities and every level for multiple players. The project was started by the Coop Deluxe Team. The purpose is to actively maintain and improve, but also continue sm64ex-coop, created by djoslin0. More features, customization, and power to the Lua API allow modders and players to enjoy Super Mario 64 more than ever!
 
 Feel free to report bugs or contribute to the project.

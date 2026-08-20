@@ -1,0 +1,35 @@
+{
+    "version": 4,
+    "name": "sm64coopdx_r36s.zip",
+    "items": [
+        "Super Mario 64 Co-op DX.sh",
+        "sm64coopdx"
+    ],
+    "items_opt": null,
+    "attr": {
+        "title": "Super Mario 64 Co-op DX (R36S)",
+        "porter": [
+            "GreekAdonis"
+        ],
+        "desc": "Super Mario 64 Co-op DX for RK3326 handhelds (R36S). A build of sm64coopdx for ArkOS with online multiplayer, widescreen and Lua modding support.",
+        "desc_md": null,
+        "inst": "You will have to copy your own rom legally obtained to ports/sm64coopdx with the name \u201cbaserom.us.z64\u201d.",
+        "inst_md": null,
+        "genres": [
+            "platformer"
+        ],
+        "image": {},
+        "rtr": false,
+        "exp": false,
+        "runtime": [],
+        "store": [],
+        "availability": "paid",
+        "reqs": [
+            "!lowres"
+        ],
+        "arch": [
+            "aarch64"
+        ],
+        "min_glibc": ""
+    }
+}
