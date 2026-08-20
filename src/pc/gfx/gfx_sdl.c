@@ -259,7 +259,11 @@ static void gfx_sdl_handle_events(void) {
                 gfx_sdl_onkeyup(event.key.keysym.scancode);
                 break;
             case SDL_MOUSEWHEEL:
+#if SDL_VERSION_ATLEAST(2, 0, 18)
                 gfx_sdl_onscroll(event.wheel.preciseX, event.wheel.preciseY);
+#else
+                gfx_sdl_onscroll(event.wheel.x, event.wheel.y);
+#endif
                 break;
             case SDL_WINDOWEVENT:
                 if (!IS_FULLSCREEN()) {

@@ -103,8 +103,8 @@ static void controller_sdl_bind(void) {
 static void controller_sdl_init(void) {
     // Allows extended reports on PS4 and PS5 controllers
     if (configExtendedReports) {
-        SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, "1");
-        SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS4_RUMBLE", "1");
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS5_RUMBLE", "1");
     }
     sExtendedReports = configExtendedReports;
 
@@ -231,8 +231,8 @@ static void controller_sdl_read(OSContPad *pad) {
     if (configExtendedReports != sExtendedReports) {
         sExtendedReports = configExtendedReports;
         char* hint = sExtendedReports ? "1" : "0";
-        SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, hint);
-        SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, hint);
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS4_RUMBLE", hint);
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS5_RUMBLE", hint);
     }
 
     if (configBackgroundGamepad != sBackgroundGamepad) {

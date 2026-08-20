@@ -21,6 +21,7 @@
 #include "segment_symbols.h"
 #include "rng_position.h"
 #include "pc/djui/djui.h"
+#include "pc/djui/djui_osk.h"
 #include "pc/djui/djui_panel_pause.h"
 #include "rumble_init.h"
 #include <prevent_bss_reordering.h>
@@ -520,6 +521,8 @@ void read_controller_inputs(void) {
         mouse_scroll_x = 0;
         mouse_scroll_y = 0;
     }
+
+    djui_osk_update();
 }
 
 // initialize the controller structs to point at the OSCont information.

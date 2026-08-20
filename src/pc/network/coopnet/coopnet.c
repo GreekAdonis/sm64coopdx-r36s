@@ -16,6 +16,9 @@
 #ifdef COOPNET
 
 #define MAX_COOPNET_DESCRIPTION_LENGTH 1024
+#if defined(__linux__) && defined(__aarch64__)
+#define COOPNET_V1_5_1_EXECUTABLE_HASH UINT64_C(4741908714061418029)
+#endif
 
 uint64_t gCoopNetDesiredLobby = 0;
 char gCoopNetPassword[64] = "";
@@ -287,6 +290,11 @@ static CoopNetRc coopnet_initialize(void) {
     gCoopNetCallbacks.OnError = coopnet_on_error;
     gCoopNetCallbacks.OnPeerDisconnected = coopnet_on_peer_disconnected;
     gCoopNetCallbacks.OnLoadBalance = coopnet_on_load_balance;
+
+#if defined(__linux__) && defined(__aarch64__)
+    // Custom AArch64 builds must report the official release compatibility token.
+    gCoopNetSettings.ExecutableHashOverride = COOPNET_V1_5_1_EXECUTABLE_HASH;
+#endif
 
     if (coopnet_is_connected()) { return COOPNET_OK; }
 

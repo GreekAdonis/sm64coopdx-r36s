@@ -1,4 +1,5 @@
 #include "djui.h"
+#include "djui_osk.h"
 #include "djui_panel.h"
 #include "djui_panel_main.h"
 #include "djui_panel_language.h"
@@ -247,6 +248,8 @@ void djui_render(void) {
     if (!sDjuiRendered60fps) {
         djui_interactable_update();
     }
+
+    djui_osk_render();
 
     djui_gfx_displaylist_end();
 }

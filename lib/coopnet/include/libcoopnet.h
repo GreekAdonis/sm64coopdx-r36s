@@ -51,6 +51,9 @@ typedef struct {
 
 typedef struct {
     bool SkipWinsockInit;
+#if defined(__linux__) && defined(__aarch64__)
+    uint64_t ExecutableHashOverride;
+#endif
 } CoopNetSettings;
 
 extern CoopNetCallbacks gCoopNetCallbacks;

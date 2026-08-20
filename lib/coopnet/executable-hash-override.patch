@@ -1,0 +1,19 @@
+diff --git a/common/client.cpp b/common/client.cpp
+--- a/common/client.cpp
++++ b/common/client.cpp
+@@ -77,4 +77,6 @@ bool Client::Begin(std::string aHost, uint32_t aPort, std::string aName, uint64_t aDestId)
+         .destId = aDestId,
+         .infoBits = SocketGetInfoBits(mConnection->mSocket),
+-        .hash = hashFile(),
++        .hash = gCoopNetSettings.ExecutableHashOverride
++            ? gCoopNetSettings.ExecutableHashOverride
++            : hashFile(),
+     }, { aName }).Send(*mConnection);
+diff --git a/common/libcoopnet.h b/common/libcoopnet.h
+--- a/common/libcoopnet.h
++++ b/common/libcoopnet.h
+@@ -52,3 +52,4 @@ typedef struct {
+ typedef struct {
+     bool SkipWinsockInit;
++    uint64_t ExecutableHashOverride;
+ } CoopNetSettings;

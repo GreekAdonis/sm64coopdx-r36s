@@ -853,7 +853,7 @@ endif
 # Coop specific libraries
 
 # Zlib
-LDFLAGS += -lz
+LDFLAGS += -lz -lrt -lpthread
 
 # Update checker library
 ifeq ($(WINDOWS_BUILD),1)
