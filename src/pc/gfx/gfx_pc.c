@@ -2455,6 +2455,10 @@ void gfx_pc_precomp_shader(uint32_t rgb1, uint32_t alpha1, uint32_t rgb2, uint32
     gfx_lookup_or_create_color_combiner(cm);
 }
 
+#ifdef HANDHELD
+extern void gfx_opengl_handheld_end_world_pass(void);
+#endif
+
 void OPTIMIZE_O3 ext_gfx_run_dl(Gfx* cmd) {
     uint32_t opcode = cmd->words.w0 >> 24;
     switch (opcode) {
@@ -2489,5 +2493,11 @@ void OPTIMIZE_O3 ext_gfx_run_dl(Gfx* cmd) {
         case G_STATE_EXT:
             gfx_sp_load_or_save_state(C0(16, 8), cmd->words.w1);
             break;
+#ifdef HANDHELD
+        case G_HANDHELD_HUD_PASS_EXT:
+            gfx_flush();
+            gfx_opengl_handheld_end_world_pass();
+            break;
+#endif
     }
 }

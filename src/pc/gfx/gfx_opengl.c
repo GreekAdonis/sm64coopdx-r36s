@@ -71,6 +71,159 @@ static int opengl_curtex = 0;
 
 static uint32_t frame_count;
 
+#ifdef HANDHELD
+// RK3326 (Mali-G31) is fill-rate bound at the panel's fixed 1024x768 mode; there
+// is no lower display mode to fall back on, so instead the 3D+HUD scene is
+// rendered into a lower-resolution offscreen FBO and upscaled to the window with
+// a single blit in gfx_opengl_finish_render(). This cuts fragment shader
+// invocations to (320*240)/(1024*768) =~ 10% of native at 4:3 (320x240 also
+// happens to match the original N64 SM64 render resolution), with the window
+// staying at the panel's native mode the whole time.
+#define HANDHELD_FBO_WIDTH  320
+#define HANDHELD_FBO_HEIGHT 240
+
+static GLuint sHandheldFbo;
+static GLuint sHandheldColorTex;
+static GLuint sHandheldDepthRbo;
+static GLuint sHandheldBlitProgram;
+static GLint sHandheldBlitPosLoc = -1;
+static uint32_t sHandheldFboWindowW;
+static uint32_t sHandheldFboWindowH;
+static bool sHandheldFboReady;
+// True while draw calls should be rescaled into the low-res FBO (the 3D world
+// pass); false once G_HANDHELD_HUD_PASS_EXT has switched to rendering the HUD
+// straight to the window at native resolution for the rest of the frame.
+static bool sHandheldWorldPassActive;
+
+static GLuint gfx_opengl_handheld_compile_shader(GLenum type, const char *src) {
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &src, NULL);
+    glCompileShader(shader);
+    GLint success;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        char log[512];
+        glGetShaderInfoLog(shader, sizeof(log), NULL, log);
+        fprintf(stderr, "handheld blit shader compile failed: %s\n", log);
+        sys_fatal("handheld internal-resolution blit shader failed to compile");
+    }
+    return shader;
+}
+
+static void gfx_opengl_handheld_create_blit_program(void) {
+#ifdef USE_GLES
+    const char *vs_src =
+        "#version 100\n"
+        "attribute vec2 aPos;\n"
+        "varying vec2 vUV;\n"
+        "void main() {\n"
+        "    vUV = aPos * 0.5 + 0.5;\n"
+        "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+        "}\n";
+    const char *fs_src =
+        "#version 100\n"
+        "precision mediump float;\n"
+        "uniform sampler2D uTex;\n"
+        "varying vec2 vUV;\n"
+        "void main() {\n"
+        "    gl_FragColor = texture2D(uTex, vUV);\n"
+        "}\n";
+#else
+    const char *vs_src =
+        "#version 120\n"
+        "attribute vec2 aPos;\n"
+        "varying vec2 vUV;\n"
+        "void main() {\n"
+        "    vUV = aPos * 0.5 + 0.5;\n"
+        "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+        "}\n";
+    const char *fs_src =
+        "#version 120\n"
+        "uniform sampler2D uTex;\n"
+        "varying vec2 vUV;\n"
+        "void main() {\n"
+        "    gl_FragColor = texture2D(uTex, vUV);\n"
+        "}\n";
+#endif
+    GLuint vs = gfx_opengl_handheld_compile_shader(GL_VERTEX_SHADER, vs_src);
+    GLuint fs = gfx_opengl_handheld_compile_shader(GL_FRAGMENT_SHADER, fs_src);
+
+    sHandheldBlitProgram = glCreateProgram();
+    glAttachShader(sHandheldBlitProgram, vs);
+    glAttachShader(sHandheldBlitProgram, fs);
+    glLinkProgram(sHandheldBlitProgram);
+    GLint linked;
+    glGetProgramiv(sHandheldBlitProgram, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        sys_fatal("handheld internal-resolution blit program failed to link");
+    }
+
+    sHandheldBlitPosLoc = glGetAttribLocation(sHandheldBlitProgram, "aPos");
+    GLint sampler_loc = glGetUniformLocation(sHandheldBlitProgram, "uTex");
+    glUseProgram(sHandheldBlitProgram);
+    glUniform1i(sampler_loc, 0);
+}
+
+static void gfx_opengl_handheld_destroy_fbo(void) {
+    if (sHandheldFbo) { glDeleteFramebuffers(1, &sHandheldFbo); sHandheldFbo = 0; }
+    if (sHandheldColorTex) { glDeleteTextures(1, &sHandheldColorTex); sHandheldColorTex = 0; }
+    if (sHandheldDepthRbo) { glDeleteRenderbuffers(1, &sHandheldDepthRbo); sHandheldDepthRbo = 0; }
+    sHandheldFboReady = false;
+}
+
+// Lazily (re)creates the internal-resolution FBO whenever the window size
+// changes. A no-op on every frame after the first once the window is stable.
+static void gfx_opengl_handheld_ensure_fbo(uint32_t window_w, uint32_t window_h) {
+    if (sHandheldFboReady && sHandheldFboWindowW == window_w && sHandheldFboWindowH == window_h) {
+        return;
+    }
+    gfx_opengl_handheld_destroy_fbo();
+    sHandheldFboWindowW = window_w;
+    sHandheldFboWindowH = window_h;
+
+    // Only worth downscaling if the window actually exceeds the internal target;
+    // otherwise just render straight to the window like the non-HANDHELD path.
+    if (window_w == 0 || window_h == 0
+        || (window_w <= HANDHELD_FBO_WIDTH && window_h <= HANDHELD_FBO_HEIGHT)) {
+        return;
+    }
+
+    glGenTextures(1, &sHandheldColorTex);
+    glBindTexture(GL_TEXTURE_2D, sHandheldColorTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, HANDHELD_FBO_WIDTH, HANDHELD_FBO_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glGenRenderbuffers(1, &sHandheldDepthRbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, sHandheldDepthRbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, HANDHELD_FBO_WIDTH, HANDHELD_FBO_HEIGHT);
+
+    glGenFramebuffers(1, &sHandheldFbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, sHandheldFbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sHandheldColorTex, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, sHandheldDepthRbo);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr, "handheld internal-resolution FBO incomplete (0x%x); rendering at native resolution\n", status);
+        gfx_opengl_handheld_destroy_fbo();
+        return;
+    }
+
+    if (!sHandheldBlitProgram) {
+        gfx_opengl_handheld_create_blit_program();
+    }
+
+    sHandheldFboReady = true;
+}
+#endif
+
 static bool gfx_opengl_z_is_from_0_to_1(void) {
     return false;
 }
@@ -768,11 +921,30 @@ static void gfx_opengl_set_zmode_decal(bool zmode_decal) {
     }
 }
 
+#ifdef HANDHELD
+// rdp.viewport/scissor are computed in window-space (gfx_current_dimensions,
+// i.e. the panel's native 1024x768); rescale into the smaller FBO we actually
+// render into. Both axes use the same source/target aspect, so this can't distort.
+static inline void gfx_opengl_handheld_rescale(int *x, int *y, int *width, int *height) {
+    if (!sHandheldWorldPassActive) return;
+    *x = (*x * HANDHELD_FBO_WIDTH) / (int)sHandheldFboWindowW;
+    *y = (*y * HANDHELD_FBO_HEIGHT) / (int)sHandheldFboWindowH;
+    *width = (*width * HANDHELD_FBO_WIDTH) / (int)sHandheldFboWindowW;
+    *height = (*height * HANDHELD_FBO_HEIGHT) / (int)sHandheldFboWindowH;
+}
+#endif
+
 static void gfx_opengl_set_viewport(int x, int y, int width, int height) {
+#ifdef HANDHELD
+    gfx_opengl_handheld_rescale(&x, &y, &width, &height);
+#endif
     glViewport(x, y, width, height);
 }
 
 static void gfx_opengl_set_scissor(int x, int y, int width, int height) {
+#ifdef HANDHELD
+    gfx_opengl_handheld_rescale(&x, &y, &width, &height);
+#endif
     glScissor(x, y, width, height);
 }
 
@@ -861,6 +1033,22 @@ static void gfx_opengl_on_resize(void) {
 static void gfx_opengl_start_frame(void) {
     frame_count++;
 
+#ifdef HANDHELD
+    gfx_opengl_handheld_ensure_fbo(gfx_current_dimensions.width, gfx_current_dimensions.height);
+    sHandheldWorldPassActive = sHandheldFboReady;
+    glBindFramebuffer(GL_FRAMEBUFFER, sHandheldFboReady ? sHandheldFbo : 0);
+    if (sHandheldFboReady) {
+        // gfx_pc.c only reissues set_viewport/set_scissor when the *logical*
+        // (window-space) rdp values change, which usually doesn't happen
+        // frame-to-frame. The physical GL viewport/scissor rect is leftover
+        // state from last frame's full-window HUD pass, so it must be reset
+        // to the FBO's own extent explicitly here -- otherwise only the
+        // bottom-left slice of the scene lands inside the (much smaller) FBO.
+        glViewport(0, 0, HANDHELD_FBO_WIDTH, HANDHELD_FBO_HEIGHT);
+        glScissor(0, 0, HANDHELD_FBO_WIDTH, HANDHELD_FBO_HEIGHT);
+    }
+#endif
+
     glDisable(GL_SCISSOR_TEST);
     glDepthMask(GL_TRUE); // Must be set to clear Z-buffer
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -871,7 +1059,58 @@ static void gfx_opengl_start_frame(void) {
 static void gfx_opengl_end_frame(void) {
 }
 
+#ifdef HANDHELD
+// Ends the low-res world pass: blits the FBO upscaled onto the window, then
+// leaves rendering targeting the window directly at native resolution for
+// whatever draws next (normally the HUD, via G_HANDHELD_HUD_PASS_EXT). Also
+// called as a fallback from gfx_opengl_finish_render() in case a frame never
+// hits that marker (e.g. loading/crash screens), so the FBO always makes it
+// to the window before swap either way.
+void gfx_opengl_handheld_end_world_pass(void) {
+    if (!sHandheldWorldPassActive) return;
+    sHandheldWorldPassActive = false;
+
+    // gfx_pc.c caches GL state (bound program+attribs, blend/depth enables)
+    // and only reissues calls when it thinks something changed, so anything
+    // the blit touches must be restored to match what it believes is current.
+    GLboolean blend_was_enabled = glIsEnabled(GL_BLEND);
+    GLboolean depth_was_enabled = glIsEnabled(GL_DEPTH_TEST);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, (GLsizei) sHandheldFboWindowW, (GLsizei) sHandheldFboWindowH);
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_SCISSOR_TEST);
+
+    glUseProgram(sHandheldBlitProgram);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, sHandheldColorTex);
+
+    static const float kBlitQuad[8] = { -1.0f, -1.0f,  1.0f, -1.0f,  -1.0f, 1.0f,  1.0f, 1.0f };
+    glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(kBlitQuad), kBlitQuad, GL_STREAM_DRAW);
+    glEnableVertexAttribArray(sHandheldBlitPosLoc);
+    glVertexAttribPointer(sHandheldBlitPosLoc, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void *) 0);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisableVertexAttribArray(sHandheldBlitPosLoc);
+
+    if (opengl_prg) {
+        glUseProgram(opengl_prg->opengl_program_id);
+        gfx_opengl_vertex_array_set_attribs(opengl_prg);
+    }
+    if (blend_was_enabled) glEnable(GL_BLEND);
+    if (depth_was_enabled) glEnable(GL_DEPTH_TEST);
+    // The old scissor rect is still in FBO-space; reset it to the full window
+    // since rendering_state's cache may not think it needs to reissue one.
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(0, 0, (GLsizei) sHandheldFboWindowW, (GLsizei) sHandheldFboWindowH);
+}
+#endif
+
 static void gfx_opengl_finish_render(void) {
+#ifdef HANDHELD
+    gfx_opengl_handheld_end_world_pass();
+#endif
 }
 
 static const char* gfx_opengl_get_name(void) {
@@ -879,6 +1118,10 @@ static const char* gfx_opengl_get_name(void) {
 }
 
 static void gfx_opengl_shutdown(void) {
+#ifdef HANDHELD
+    gfx_opengl_handheld_destroy_fbo();
+    if (sHandheldBlitProgram) { glDeleteProgram(sHandheldBlitProgram); sHandheldBlitProgram = 0; }
+#endif
 }
 
 struct GfxRenderingAPI gfx_opengl_api = {
