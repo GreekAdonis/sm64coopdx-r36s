@@ -213,6 +213,32 @@ bool djui_interactable_on_key_down(int scancode) {
                    && (gInteractableFocus->interactable != NULL)
                    && (gInteractableFocus->interactable->on_key_down != NULL);
 
+    // Gamepad D-pad/A/B/Start must drive OSK and panel navigation even while a text
+    // input has focus, so this runs before the focused widget can consume the keypress.
+    // Restricted to genuine gamepad scancodes (VK_BASE_SDL_GAMEPAD+) so keyboard binds
+    // (e.g. Start = Space) don't hijack normal chat typing.
+    if ((gDjuiChatBoxFocus || djui_panel_is_active()) && scancode >= VK_BASE_SDL_GAMEPAD) {
+        for (int i = 0; i < MAX_BINDS; i++) {
+            if (scancode == (int)configKeyDUp[i])    { sKeyboardHoldDirection = PAD_HOLD_DIR_UP;    return true; }
+            if (scancode == (int)configKeyDDown[i])  { sKeyboardHoldDirection = PAD_HOLD_DIR_DOWN;  return true; }
+            if (scancode == (int)configKeyDLeft[i])  { sKeyboardHoldDirection = PAD_HOLD_DIR_LEFT;  return true; }
+            if (scancode == (int)configKeyDRight[i]) { sKeyboardHoldDirection = PAD_HOLD_DIR_RIGHT; return true; }
+            if (scancode == (int)configKeyA[i])      { sKeyboardButtons |= PAD_BUTTON_A;            return true; }
+            if (scancode == (int)configKeyB[i])      { sKeyboardButtons |= PAD_BUTTON_B;            return true; }
+            if (scancode == (int)configKeyStart[i])  { sKeyboardButtons |= PAD_BUTTON_START;        return true; }
+            if (scancode == (int)configKeyL[i])      { sKeyboardButtons |= L_TRIG;                  return true; }
+            if (scancode == (int)configKeyR[i])      { sKeyboardButtons |= R_TRIG;                  return true; }
+        }
+    }
+
+    // The gamepad chat-toggle bind must also be able to CLOSE chat while its input is
+    // focused; otherwise the focused inputbox below swallows the keypress unseen.
+    if (gDjuiChatBoxFocus && scancode >= VK_BASE_SDL_GAMEPAD) {
+        for (int i = 0; i < MAX_BINDS; i++) {
+            if (scancode == (int)configKeyChat[i]) { djui_chat_box_close(); return true; }
+        }
+    }
+
     if (keyFocused) {
         bool consume = gInteractableFocus->interactable->on_key_down(gInteractableFocus, scancode);
         if (consume) {
@@ -330,6 +356,20 @@ void djui_interactable_on_key_up(int scancode) {
         case SCANCODE_LEFT:  if (sKeyboardHoldDirection == PAD_HOLD_DIR_LEFT)  { sKeyboardHoldDirection = PAD_HOLD_DIR_NONE; pad->stick_x = 0; } break;
         case SCANCODE_RIGHT: if (sKeyboardHoldDirection == PAD_HOLD_DIR_RIGHT) { sKeyboardHoldDirection = PAD_HOLD_DIR_NONE; pad->stick_x = 0; } break;
         case SCANCODE_ENTER: sKeyboardButtons &= ~PAD_BUTTON_A; break;
+    }
+
+    if (scancode >= VK_BASE_SDL_GAMEPAD) {
+        for (int i = 0; i < MAX_BINDS; i++) {
+            if (scancode == (int)configKeyDUp[i]    && sKeyboardHoldDirection == PAD_HOLD_DIR_UP)    { sKeyboardHoldDirection = PAD_HOLD_DIR_NONE; pad->stick_y = 0; }
+            if (scancode == (int)configKeyDDown[i]  && sKeyboardHoldDirection == PAD_HOLD_DIR_DOWN)  { sKeyboardHoldDirection = PAD_HOLD_DIR_NONE; pad->stick_y = 0; }
+            if (scancode == (int)configKeyDLeft[i]  && sKeyboardHoldDirection == PAD_HOLD_DIR_LEFT)  { sKeyboardHoldDirection = PAD_HOLD_DIR_NONE; pad->stick_x = 0; }
+            if (scancode == (int)configKeyDRight[i] && sKeyboardHoldDirection == PAD_HOLD_DIR_RIGHT) { sKeyboardHoldDirection = PAD_HOLD_DIR_NONE; pad->stick_x = 0; }
+            if (scancode == (int)configKeyA[i])     { sKeyboardButtons &= ~PAD_BUTTON_A; }
+            if (scancode == (int)configKeyB[i])     { sKeyboardButtons &= ~PAD_BUTTON_B; }
+            if (scancode == (int)configKeyStart[i]) { sKeyboardButtons &= ~PAD_BUTTON_START; }
+            if (scancode == (int)configKeyL[i])     { sKeyboardButtons &= ~L_TRIG; }
+            if (scancode == (int)configKeyR[i])     { sKeyboardButtons &= ~R_TRIG; }
+        }
     }
 }
 

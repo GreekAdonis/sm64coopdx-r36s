@@ -323,6 +323,10 @@ static void controller_sdl_read(OSContPad *pad) {
         if (joy_buttons[joy_binds[i][0]])
             buttons_down |= joy_binds[i][1];
 
+    // Trap D-pad/button presses while chat is focused so they don't also act as
+    // gameplay input; sticks (movement/camera) are read separately below and stay live.
+    if (gDjuiChatBoxFocus) { buttons_down = 0; }
+
     pad->button |= buttons_down;
 
     const u32 xstick = buttons_down & STICK_XMASK;

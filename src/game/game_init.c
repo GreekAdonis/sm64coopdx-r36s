@@ -254,12 +254,6 @@ void end_master_display_list(void) {
         draw_profiler();
     }
 
-#ifdef HANDHELD
-    // HUD from here on should render at native resolution, not through the
-    // low-res internal FBO (see gfx_opengl.c and G_HANDHELD_HUD_PASS_EXT).
-    gSPHandheldBeginHudPass(gDisplayListHead++);
-#endif
-
     extern void djui_render(void);
     djui_render();
 

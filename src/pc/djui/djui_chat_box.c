@@ -520,6 +520,14 @@ void djui_chat_box_toggle(void) {
     gDjuiChatBox->chatFlow->base.y.value = gDjuiChatBox->chatContainer->base.elem.height - gDjuiChatBox->chatFlow->base.height.value;
 }
 
+// Cancels and closes the chat box, discarding whatever was typed.
+// Used by the gamepad chat-toggle bind so it can close chat even while
+// the chat input is focused (mirrors what pressing Escape already does).
+void djui_chat_box_close(void) {
+    if (gDjuiChatBox == NULL || !gDjuiChatBoxFocus) { return; }
+    djui_chat_box_input_escape(gDjuiChatBox->chatInput);
+}
+
 struct DjuiChatBox* djui_chat_box_create(void) {
     if (gDjuiChatBox != NULL) {
         djui_base_destroy(&gDjuiChatBox->base);

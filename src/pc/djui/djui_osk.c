@@ -146,7 +146,7 @@ static void djui_osk_activate_key(s32 row, s32 col) {
             djui_interactable_on_key_down(SCANCODE_RIGHT);
             break;
         case OSK_KEY_DONE:
-            djui_interactable_set_input_focus(NULL);
+            djui_interactable_on_key_down(SCANCODE_ENTER);
             break;
     }
 }
@@ -195,8 +195,8 @@ static u8 djui_osk_get_direction(void) {
     OSContPad* pad = &gInteractablePad;
     if (pad->stick_x < -OSK_STICK_DEADZONE) { return 1; }
     if (pad->stick_x >  OSK_STICK_DEADZONE) { return 2; }
-    if (pad->stick_y >  OSK_STICK_DEADZONE) { return 3; }
-    if (pad->stick_y < -OSK_STICK_DEADZONE) { return 4; }
+    if (pad->stick_y < -OSK_STICK_DEADZONE) { return 3; }
+    if (pad->stick_y >  OSK_STICK_DEADZONE) { return 4; }
     if (pad->button & U_JPAD) { return 3; }
     if (pad->button & D_JPAD) { return 4; }
     if (pad->button & L_JPAD) { return 1; }
@@ -307,7 +307,9 @@ void djui_osk_render(void) {
     f32 pad = 4.0f;
     f32 panelH = OSK_ROWS * keyH + (OSK_ROWS - 1) * gap + 2.0f * pad;
     f32 x0 = margin;
-    f32 y0 = (f32)sh - panelH - margin;
+    // Anchored to the top of the screen, not the bottom, so it doesn't cover
+    // the chat input box (which is bottom-aligned).
+    f32 y0 = margin;
 
     djui_hud_set_font(FONT_ALIASED);
     djui_hud_set_text_alignment(0.5f, 0.5f);

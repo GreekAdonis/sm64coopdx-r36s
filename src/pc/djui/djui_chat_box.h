@@ -14,4 +14,5 @@ extern struct DjuiChatBox* gDjuiChatBox;
 extern bool gDjuiChatBoxFocus;
 
 void djui_chat_box_toggle(void);
+void djui_chat_box_close(void);
 struct DjuiChatBox* djui_chat_box_create(void);

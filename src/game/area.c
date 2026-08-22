@@ -451,6 +451,15 @@ void render_game(void) {
     if (gCurrentArea != NULL && !gWarpTransition.pauseRendering) {
         geo_process_root(gCurrentArea->root, gViewportOverride, gViewportClip, gFBSetColor);
 
+#ifdef HANDHELD
+        // Everything from here on (HUD, nametags, text, cutscenes, menus, DJUI)
+        // is 2D screen-space content -- render it at native resolution instead
+        // of through the low-res internal FBO (see gfx_opengl.c and
+        // G_HANDHELD_HUD_PASS_EXT). Only the 3D world geometry above this point
+        // renders low-res.
+        gSPHandheldBeginHudPass(gDisplayListHead++);
+#endif
+
         gSPViewport(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(&gViewportFullscreen));
 
         gDPSetScissor(gDisplayListHead++, G_SC_NON_INTERLACE, 0, BORDER_HEIGHT, SCREEN_WIDTH,

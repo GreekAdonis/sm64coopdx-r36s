@@ -115,7 +115,11 @@ static const unsigned int defaultConfigKeyStickUp[MAX_BINDS]    = { 0x0011,     
 static const unsigned int defaultConfigKeyStickDown[MAX_BINDS]  = { 0x001F,     VK_INVALID, VK_INVALID };
 static const unsigned int defaultConfigKeyStickLeft[MAX_BINDS]  = { 0x001E,     VK_INVALID, VK_INVALID };
 static const unsigned int defaultConfigKeyStickRight[MAX_BINDS] = { 0x0020,     VK_INVALID, VK_INVALID };
+#ifdef HANDHELD
+static const unsigned int defaultConfigKeyChat[MAX_BINDS]       = { 0x001C,     0x1008,     VK_INVALID };
+#else
 static const unsigned int defaultConfigKeyChat[MAX_BINDS]       = { 0x001C,     VK_INVALID, VK_INVALID };
+#endif
 static const unsigned int defaultConfigKeyPlayerList[MAX_BINDS] = { 0x000F,     0x1004,     VK_INVALID };
 static const unsigned int defaultConfigKeyDUp[MAX_BINDS]        = { 0x0147,     0x100b,     VK_INVALID };
 static const unsigned int defaultConfigKeyDDown[MAX_BINDS]      = { 0x014f,     0x100c,     VK_INVALID };
@@ -142,7 +146,11 @@ unsigned int configKeyStickUp[MAX_BINDS]          = { 0x0011,     VK_INVALID, VK
 unsigned int configKeyStickDown[MAX_BINDS]        = { 0x001F,     VK_INVALID, VK_INVALID };
 unsigned int configKeyStickLeft[MAX_BINDS]        = { 0x001E,     VK_INVALID, VK_INVALID };
 unsigned int configKeyStickRight[MAX_BINDS]       = { 0x0020,     VK_INVALID, VK_INVALID };
+#ifdef HANDHELD
+unsigned int configKeyChat[MAX_BINDS]             = { 0x001C,     0x1008,     VK_INVALID };
+#else
 unsigned int configKeyChat[MAX_BINDS]             = { 0x001C,     VK_INVALID, VK_INVALID };
+#endif
 unsigned int configKeyPlayerList[MAX_BINDS]       = { 0x000F,     0x1004,     VK_INVALID };
 unsigned int configKeyDUp[MAX_BINDS]              = { 0x0147,     0x100b,     VK_INVALID };
 unsigned int configKeyDDown[MAX_BINDS]            = { 0x014f,     0x100c,     VK_INVALID };
