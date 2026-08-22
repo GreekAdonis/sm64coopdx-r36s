@@ -409,6 +409,13 @@ void produce_one_dummy_frame(void (*callback)(), u8 clearColorR, u8 clearColorG,
     create_dl_ortho_matrix();
     djui_gfx_displaylist_begin();
 
+#ifdef HANDHELD
+    // This is a 2D screen-space scene (loading/crash screen) -- render it at
+    // native resolution instead of through the low-res internal FBO used for
+    // the 3D world pass (see gfx_opengl.c and G_HANDHELD_HUD_PASS_EXT).
+    gSPHandheldBeginHudPass(gDisplayListHead++);
+#endif
+
     // fix scaling issues
     gSPViewport(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(&gViewportFullscreen));
     gDPSetScissor(gDisplayListHead++, G_SC_NON_INTERLACE, 0, BORDER_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT - BORDER_HEIGHT);

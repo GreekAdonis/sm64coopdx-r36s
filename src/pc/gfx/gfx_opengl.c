@@ -78,15 +78,21 @@ static uint32_t frame_count;
 // a single blit in gfx_opengl_finish_render(). This cuts fragment shader
 // invocations to (320*240)/(1024*768) =~ 10% of native at 4:3 (320x240 also
 // happens to match the original N64 SM64 render resolution), with the window
-// staying at the panel's native mode the whole time.
-#define HANDHELD_FBO_WIDTH  320
-#define HANDHELD_FBO_HEIGHT 240
+// staying at the panel's native mode the whole time. The internal resolution
+// is configurable (configHandheldResW/H); these are just the defaults used
+// when unconfigured (0).
+#define HANDHELD_FBO_DEFAULT_WIDTH  320
+#define HANDHELD_FBO_DEFAULT_HEIGHT 240
 
 static GLuint sHandheldFbo;
 static GLuint sHandheldColorTex;
 static GLuint sHandheldDepthRbo;
 static GLuint sHandheldBlitProgram;
 static GLint sHandheldBlitPosLoc = -1;
+static GLint sHandheldBlitSrcSizeLoc = -1;
+static GLint sHandheldBlitScaleLoc = -1;
+static uint32_t sHandheldFboW = HANDHELD_FBO_DEFAULT_WIDTH;
+static uint32_t sHandheldFboH = HANDHELD_FBO_DEFAULT_HEIGHT;
 static uint32_t sHandheldFboWindowW;
 static uint32_t sHandheldFboWindowH;
 static bool sHandheldFboReady;
@@ -111,6 +117,14 @@ static GLuint gfx_opengl_handheld_compile_shader(GLenum type, const char *src) {
 }
 
 static void gfx_opengl_handheld_create_blit_program(void) {
+    // "sharp-bilinear": ordinary bilinear filtering blurs every texel edge,
+    // including ones that land exactly on a source-pixel boundary, which is
+    // what makes the plain upscale look soft. This snaps each sample to the
+    // nearest source pixel except within a thin blend band (sized from the
+    // upscale ratio) around each texel edge, so pixel interiors stay crisp
+    // while edges still get an antialiased transition instead of nearest-
+    // neighbor's hard/shimmery step. uSrcSize is the FBO size in texels;
+    // uScale is (window size / FBO size) per axis.
 #ifdef USE_GLES
     const char *vs_src =
         "#version 100\n"
@@ -124,9 +138,18 @@ static void gfx_opengl_handheld_create_blit_program(void) {
         "#version 100\n"
         "precision mediump float;\n"
         "uniform sampler2D uTex;\n"
+        "uniform vec2 uSrcSize;\n"
+        "uniform vec2 uScale;\n"
         "varying vec2 vUV;\n"
         "void main() {\n"
-        "    gl_FragColor = texture2D(uTex, vUV);\n"
+        "    vec2 texel = vUV * uSrcSize;\n"
+        "    vec2 texelFloor = floor(texel);\n"
+        "    vec2 s = fract(texel);\n"
+        "    vec2 regionRange = 0.5 - 0.5 / uScale;\n"
+        "    vec2 centerDist = s - 0.5;\n"
+        "    vec2 f = (centerDist - clamp(centerDist, -regionRange, regionRange)) * uScale + 0.5;\n"
+        "    vec2 modTexel = texelFloor + f;\n"
+        "    gl_FragColor = texture2D(uTex, modTexel / uSrcSize);\n"
         "}\n";
 #else
     const char *vs_src =
@@ -140,9 +163,18 @@ static void gfx_opengl_handheld_create_blit_program(void) {
     const char *fs_src =
         "#version 120\n"
         "uniform sampler2D uTex;\n"
+        "uniform vec2 uSrcSize;\n"
+        "uniform vec2 uScale;\n"
         "varying vec2 vUV;\n"
         "void main() {\n"
-        "    gl_FragColor = texture2D(uTex, vUV);\n"
+        "    vec2 texel = vUV * uSrcSize;\n"
+        "    vec2 texelFloor = floor(texel);\n"
+        "    vec2 s = fract(texel);\n"
+        "    vec2 regionRange = 0.5 - 0.5 / uScale;\n"
+        "    vec2 centerDist = s - 0.5;\n"
+        "    vec2 f = (centerDist - clamp(centerDist, -regionRange, regionRange)) * uScale + 0.5;\n"
+        "    vec2 modTexel = texelFloor + f;\n"
+        "    gl_FragColor = texture2D(uTex, modTexel / uSrcSize);\n"
         "}\n";
 #endif
     GLuint vs = gfx_opengl_handheld_compile_shader(GL_VERTEX_SHADER, vs_src);
@@ -160,6 +192,8 @@ static void gfx_opengl_handheld_create_blit_program(void) {
 
     sHandheldBlitPosLoc = glGetAttribLocation(sHandheldBlitProgram, "aPos");
     GLint sampler_loc = glGetUniformLocation(sHandheldBlitProgram, "uTex");
+    sHandheldBlitSrcSizeLoc = glGetUniformLocation(sHandheldBlitProgram, "uSrcSize");
+    sHandheldBlitScaleLoc = glGetUniformLocation(sHandheldBlitProgram, "uScale");
     glUseProgram(sHandheldBlitProgram);
     glUniform1i(sampler_loc, 0);
 }
@@ -171,26 +205,33 @@ static void gfx_opengl_handheld_destroy_fbo(void) {
     sHandheldFboReady = false;
 }
 
-// Lazily (re)creates the internal-resolution FBO whenever the window size
-// changes. A no-op on every frame after the first once the window is stable.
+// Lazily (re)creates the internal-resolution FBO whenever the window size or
+// the configured internal resolution changes. A no-op on every frame after
+// the first once both are stable.
 static void gfx_opengl_handheld_ensure_fbo(uint32_t window_w, uint32_t window_h) {
-    if (sHandheldFboReady && sHandheldFboWindowW == window_w && sHandheldFboWindowH == window_h) {
+    uint32_t target_w = configHandheldResW ? configHandheldResW : HANDHELD_FBO_DEFAULT_WIDTH;
+    uint32_t target_h = configHandheldResH ? configHandheldResH : HANDHELD_FBO_DEFAULT_HEIGHT;
+
+    if (sHandheldFboReady && sHandheldFboWindowW == window_w && sHandheldFboWindowH == window_h
+        && sHandheldFboW == target_w && sHandheldFboH == target_h) {
         return;
     }
     gfx_opengl_handheld_destroy_fbo();
     sHandheldFboWindowW = window_w;
     sHandheldFboWindowH = window_h;
+    sHandheldFboW = target_w;
+    sHandheldFboH = target_h;
 
     // Only worth downscaling if the window actually exceeds the internal target;
     // otherwise just render straight to the window like the non-HANDHELD path.
     if (window_w == 0 || window_h == 0
-        || (window_w <= HANDHELD_FBO_WIDTH && window_h <= HANDHELD_FBO_HEIGHT)) {
+        || (window_w <= sHandheldFboW && window_h <= sHandheldFboH)) {
         return;
     }
 
     glGenTextures(1, &sHandheldColorTex);
     glBindTexture(GL_TEXTURE_2D, sHandheldColorTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, HANDHELD_FBO_WIDTH, HANDHELD_FBO_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, sHandheldFboW, sHandheldFboH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -198,7 +239,7 @@ static void gfx_opengl_handheld_ensure_fbo(uint32_t window_w, uint32_t window_h)
 
     glGenRenderbuffers(1, &sHandheldDepthRbo);
     glBindRenderbuffer(GL_RENDERBUFFER, sHandheldDepthRbo);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, HANDHELD_FBO_WIDTH, HANDHELD_FBO_HEIGHT);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, sHandheldFboW, sHandheldFboH);
 
     glGenFramebuffers(1, &sHandheldFbo);
     glBindFramebuffer(GL_FRAMEBUFFER, sHandheldFbo);
@@ -927,10 +968,10 @@ static void gfx_opengl_set_zmode_decal(bool zmode_decal) {
 // render into. Both axes use the same source/target aspect, so this can't distort.
 static inline void gfx_opengl_handheld_rescale(int *x, int *y, int *width, int *height) {
     if (!sHandheldWorldPassActive) return;
-    *x = (*x * HANDHELD_FBO_WIDTH) / (int)sHandheldFboWindowW;
-    *y = (*y * HANDHELD_FBO_HEIGHT) / (int)sHandheldFboWindowH;
-    *width = (*width * HANDHELD_FBO_WIDTH) / (int)sHandheldFboWindowW;
-    *height = (*height * HANDHELD_FBO_HEIGHT) / (int)sHandheldFboWindowH;
+    *x = (*x * (int)sHandheldFboW) / (int)sHandheldFboWindowW;
+    *y = (*y * (int)sHandheldFboH) / (int)sHandheldFboWindowH;
+    *width = (*width * (int)sHandheldFboW) / (int)sHandheldFboWindowW;
+    *height = (*height * (int)sHandheldFboH) / (int)sHandheldFboWindowH;
 }
 #endif
 
@@ -1044,8 +1085,8 @@ static void gfx_opengl_start_frame(void) {
         // state from last frame's full-window HUD pass, so it must be reset
         // to the FBO's own extent explicitly here -- otherwise only the
         // bottom-left slice of the scene lands inside the (much smaller) FBO.
-        glViewport(0, 0, HANDHELD_FBO_WIDTH, HANDHELD_FBO_HEIGHT);
-        glScissor(0, 0, HANDHELD_FBO_WIDTH, HANDHELD_FBO_HEIGHT);
+        glViewport(0, 0, sHandheldFboW, sHandheldFboH);
+        glScissor(0, 0, sHandheldFboW, sHandheldFboH);
     }
 #endif
 
@@ -1083,6 +1124,10 @@ void gfx_opengl_handheld_end_world_pass(void) {
     glDisable(GL_SCISSOR_TEST);
 
     glUseProgram(sHandheldBlitProgram);
+    glUniform2f(sHandheldBlitSrcSizeLoc, (float) sHandheldFboW, (float) sHandheldFboH);
+    glUniform2f(sHandheldBlitScaleLoc,
+                (float) sHandheldFboWindowW / (float) sHandheldFboW,
+                (float) sHandheldFboWindowH / (float) sHandheldFboH);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, sHandheldColorTex);
 

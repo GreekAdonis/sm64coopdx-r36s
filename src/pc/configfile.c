@@ -90,6 +90,10 @@ enum RefreshRateMode configFramerateMode          = RRM_AUTO;
 unsigned int configFrameLimit                     = 60;
 unsigned int configInterpolationMode              = 1;
 unsigned int configDrawDistance                   = 6;
+#ifdef HANDHELD
+unsigned int configHandheldResW                   = 0; // internal render width; 0 = use built-in default
+unsigned int configHandheldResH                   = 0; // internal render height; 0 = use built-in default
+#endif
 // sound settings
 unsigned int configMasterVolume                   = 80; // 0 - MAX_VOLUME
 unsigned int configMusicVolume                    = MAX_VOLUME;
@@ -272,6 +276,10 @@ static const struct ConfigOption options[] = {
     {.name = "frame_limit",                    .type = CONFIG_TYPE_UINT, .uintValue = &configFrameLimit},
     {.name = "interpolation_mode",             .type = CONFIG_TYPE_UINT, .uintValue = &configInterpolationMode},
     {.name = "coop_draw_distance",             .type = CONFIG_TYPE_UINT, .uintValue = &configDrawDistance},
+#ifdef HANDHELD
+    {.name = "handheld_res_w",                 .type = CONFIG_TYPE_UINT, .uintValue = &configHandheldResW},
+    {.name = "handheld_res_h",                 .type = CONFIG_TYPE_UINT, .uintValue = &configHandheldResH},
+#endif
     // sound settings
     {.name = "master_volume",                  .type = CONFIG_TYPE_UINT, .uintValue = &configMasterVolume},
     {.name = "music_volume",                   .type = CONFIG_TYPE_UINT, .uintValue = &configMusicVolume},

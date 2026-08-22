@@ -64,6 +64,10 @@ extern enum RefreshRateMode configFramerateMode;
 extern unsigned int configFrameLimit;
 extern unsigned int configInterpolationMode;
 extern unsigned int configDrawDistance;
+#ifdef HANDHELD
+extern unsigned int configHandheldResW;
+extern unsigned int configHandheldResH;
+#endif
 // sound settings
 extern unsigned int configMasterVolume;
 extern unsigned int configMusicVolume;
