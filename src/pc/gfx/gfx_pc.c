@@ -165,14 +165,34 @@ UNUSED static const uint8_t missing_texture[MISSING_W * MISSING_H * 4] = {
 };
 
 static bool sOnlyTextureChangeOnAddrChange = false;
+
+// Bumped whenever something outside the display list changes what a texture
+// pointer resolves to: a texture pack being activated or deactivated, or a Lua
+// mod calling texture_override_set/reset. The tile-descriptor guards below
+// suppress re-imports when the display list re-states texture state it already
+// stated, which is only sound as long as an out-of-band change still forces one.
+uint32_t gGfxTextureGeneration = 1;
+static uint32_t sSeenTextureGeneration = 0;
+
+void gfx_texture_state_invalidate(void) {
+    gGfxTextureGeneration++;
+}
+
 static void gfx_update_loaded_texture(uint8_t tile_number, uint32_t size_bytes, const uint8_t* addr) {
     if (tile_number >= MAX_TILES) { return; }
     tile_number = rdp.texture_tile[tile_number].index;
-    if (!sOnlyTextureChangeOnAddrChange) {
-        rdp.textures_changed[tile_number] = true;
-    } else if (!rdp.textures_changed[tile_number]) {
-        rdp.textures_changed[tile_number] = rdp.loaded_texture[tile_number].addr != addr;
+    // Re-loading the exact same block from the exact same address leaves every
+    // input to import_texture() bit-identical, so the import would resolve to
+    // the texture that is already bound. Flagging it as changed anyway costs a
+    // gfx_flush() -- i.e. a whole extra draw call -- per repeat. A crowd of
+    // identical objects re-states its shared texture once per object, so this
+    // is the single biggest per-object cost in the renderer.
+    if (!rdp.textures_changed[tile_number]
+        && rdp.loaded_texture[tile_number].addr == addr
+        && rdp.loaded_texture[tile_number].size_bytes == size_bytes) {
+        return;
     }
+    rdp.textures_changed[tile_number] = true;
     rdp.loaded_texture[tile_number].size_bytes = size_bytes;
     rdp.loaded_texture[tile_number].addr = addr;
 }
@@ -1528,6 +1548,22 @@ static void gfx_dp_set_texture_image(UNUSED uint32_t format, uint32_t size, UNUS
 }
 
 static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t tmem, uint8_t tile, uint32_t palette, uint32_t cmt, uint32_t maskt, uint32_t shiftt, uint32_t cms, uint32_t masks, uint32_t shifts) {
+    // Same reasoning as gfx_update_loaded_texture(): if every field this writes
+    // already holds the value being written, the tile is unchanged and nothing
+    // downstream needs re-importing.
+    const struct TextureTile* prev = &rdp.texture_tile[tile];
+    bool unchanged = prev->fmt             == fmt
+                  && prev->siz             == siz
+                  && prev->cms             == cms
+                  && prev->cmt             == cmt
+                  && prev->shifts          == shifts
+                  && prev->shiftt          == shiftt
+                  && prev->masks           == masks
+                  && prev->maskt           == maskt
+                  && prev->line_size_bytes == line * 8
+                  && prev->tmem            == tmem
+                  && prev->palette         == palette;
+
     rdp.texture_tile[tile].fmt = fmt;
     rdp.texture_tile[tile].siz = siz;
     rdp.texture_tile[tile].cms = cms;
@@ -1541,18 +1577,22 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
     rdp.texture_tile[tile].palette = palette;
     // For some reason toad player's face breaks without this line, everything else is fine though
     rdp.texture_tile[tile].index = (tile == G_TX_LOADTILE ? tmem/256 : (tile == G_TX_LOADTILE_6_UNKNOWN ? 1 : 0));
-    if (!sOnlyTextureChangeOnAddrChange) {
+    if (!sOnlyTextureChangeOnAddrChange && !unchanged) {
         rdp.textures_changed[0] = true;
         rdp.textures_changed[1] = true;
     }
 }
 
 static void gfx_dp_set_tile_size(uint8_t tile, uint16_t uls, uint16_t ult, uint16_t lrs, uint16_t lrt) {
+    const struct TextureTile* prev = &rdp.texture_tile[tile];
+    bool unchanged = prev->uls == uls && prev->ult == ult
+                  && prev->lrs == lrs && prev->lrt == lrt;
+
     rdp.texture_tile[tile].uls = uls;
     rdp.texture_tile[tile].ult = ult;
     rdp.texture_tile[tile].lrs = lrs;
     rdp.texture_tile[tile].lrt = lrt;
-    if (!sOnlyTextureChangeOnAddrChange) {
+    if (!sOnlyTextureChangeOnAddrChange && !unchanged) {
         rdp.textures_changed[0] = true;
         rdp.textures_changed[1] = true;
     }
@@ -2150,6 +2190,17 @@ void gfx_start_frame(void) {
 
 void gfx_run(Gfx *commands) {
     gfx_sp_reset();
+
+    // A texture pack toggle or a Lua texture override changes what an unchanged
+    // texture pointer resolves to, which the tile-descriptor guards in
+    // gfx_update_loaded_texture()/gfx_dp_set_tile()/gfx_dp_set_tile_size()
+    // cannot see. Force one re-import pass when that happens.
+    if (sSeenTextureGeneration != gGfxTextureGeneration) {
+        sSeenTextureGeneration = gGfxTextureGeneration;
+        for (size_t i = 0; i < MAX_TEXTURES; i++) {
+            rdp.textures_changed[i] = true;
+        }
+    }
 
     sHasInverseCameraMatrix = false;
 

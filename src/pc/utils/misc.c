@@ -17,6 +17,7 @@
 #include <direct.h>
 #endif
 #include <ctype.h>
+#include <string.h>
 
 #include "misc.h"
 
@@ -522,6 +523,18 @@ inline static void delta_interpolate_mtx_accurate(Mtx* out, Mtx* a, Mtx* b, f32 
 }
 
 void delta_interpolate_mtx(Mtx* out, Mtx* a, Mtx* b, f32 delta) {
+    // Anything that did not move between the two game frames interpolates to
+    // itself. Most matrices in a busy scene are in that state -- idle objects,
+    // static scenery, every node above them -- and the accurate path below
+    // costs two full matrix decompositions, a quaternion slerp and a
+    // recomposition to arrive back at the input. Bit-identical is the only case
+    // worth testing for: it is exactly the one that arises from a matrix simply
+    // not being rewritten, and any real motion fails it immediately.
+    if (memcmp(a, b, sizeof(Mtx)) == 0) {
+        if (out != b) { *out = *b; }
+        return;
+    }
+
     // HACK: Limit accurate interpolation to 64-bit builds
     if (sizeof(void*) > 4) {
         if (configInterpolationMode) {
@@ -540,6 +553,12 @@ void delta_interpolate_mtx(Mtx* out, Mtx* a, Mtx* b, f32 delta) {
 }
 
 void detect_and_skip_mtx_interpolation(Mtx** mtxPrev, Mtx** mtx) {
+    // Six vec3f_normalize calls -- six square roots -- to compare a matrix with
+    // itself. An unmoved matrix has all three dots equal to 1 and can never
+    // trip the threshold, so test for that first: it is the common case once a
+    // scene holds a few hundred mostly-idle objects.
+    if (memcmp((*mtxPrev)->m, (*mtx)->m, sizeof(f32) * 3 * 4) == 0) { return; }
+
     // if the matrix has changed "too much", then skip interpolation
     const f32 minDot = sqrt(2.0f) / -3.0f;
     Vec3f prevX; vec3f_copy(prevX, (f32*)(*mtxPrev)->m[0]); vec3f_normalize(prevX);

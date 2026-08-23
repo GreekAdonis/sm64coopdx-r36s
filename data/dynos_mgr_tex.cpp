@@ -3,8 +3,10 @@
 #include <string>
 #include <vector>
 #include "dynos.cpp.h"
+#include <unordered_map>
 extern "C" {
 #include "pc/gfx/gfx.h"
+#include "pc/gfx/gfx_pc.h"
 #include "pc/gfx/gfx_rendering_api.h"
 #include "pc/mods/mod_fs.h"
 }
@@ -42,6 +44,16 @@ static std::vector<DataNode<TexData> *> &DynosScheduledInvalidTextures() {
 static std::vector<std::pair<std::string, DataNode<TexData> *>> &DynosCustomTexs() {
     static std::vector<std::pair<std::string, DataNode<TexData> *>> sDynosCustomTexs;
     return sDynosCustomTexs;
+}
+
+// DynOS_Tex_RetrieveNode() runs once per texture bind, several hundred times a
+// frame, and used to finish by walking every entry of DynosCustomTexs() looking
+// for one whose raw data starts at the pointer being resolved. Vanilla textures
+// never match, so every one of them paid for a full scan. This mirrors that
+// lookup as a hash map keyed on exactly the pointer the scan compared.
+static std::unordered_map<const void *, DataNode<TexData> *> &DynosCustomTexsByData() {
+    static std::unordered_map<const void *, DataNode<TexData> *> sDynosCustomTexsByData;
+    return sDynosCustomTexsByData;
 }
 
 static bool sDynosDumpTextureCache = false;
@@ -281,6 +293,7 @@ void DynOS_Tex_Valid(GfxData* aGfxData) {
     for (auto &_Texture : aGfxData->mTextures) {
         DynosValidTextures().insert(_Texture);
     }
+    gfx_texture_state_invalidate();
 }
 
 void DynOS_Tex_Invalid(GfxData* aGfxData) {
@@ -297,6 +310,7 @@ void DynOS_Tex_Update() {
         DynosValidTextures().erase(_Texture);
     }
     schedule.clear();
+    gfx_texture_state_invalidate();
 }
 
 //
@@ -304,20 +318,27 @@ void DynOS_Tex_Update() {
 //
 
 static DataNode<TexData> *DynOS_Tex_RetrieveNode(void *aPtr) {
+    // These are all lookups, not insertions. std::map::operator[] default-
+    // constructs a NULL entry on a miss, so the previous code grew each map by
+    // one node per distinct vanilla texture pointer ever drawn and then paid a
+    // deeper red-black descent on every subsequent lookup. find() does not.
     {
-        auto _LuaOverrideTexture = DynosOverrideLuaTextures()[(const Texture*)aPtr];
-        if (_LuaOverrideTexture && _LuaOverrideTexture->node) {
-            return _LuaOverrideTexture->node;
+        auto& _LuaOverrideTextures = DynosOverrideLuaTextures();
+        auto _It = _LuaOverrideTextures.find((const Texture*)aPtr);
+        if (_It != _LuaOverrideTextures.end() && _It->second && _It->second->node) {
+            return _It->second->node;
         }
-        auto _LuaOverrideTexData = DynosOverrideLuaTexData()[(DataNode<TexData>*)aPtr];
-        if (_LuaOverrideTexData && _LuaOverrideTexData->node) {
-            return _LuaOverrideTexData->node;
+        auto& _LuaOverrideTexData = DynosOverrideLuaTexData();
+        auto _It2 = _LuaOverrideTexData.find((DataNode<TexData>*)aPtr);
+        if (_It2 != _LuaOverrideTexData.end() && _It2->second && _It2->second->node) {
+            return _It2->second->node;
         }
     }
 
-    auto _Override = DynosOverrideTextures()[(const Texture*)aPtr];
-    if (_Override && _Override->node) {
-        return _Override->node;
+    auto& _OverrideTextures = DynosOverrideTextures();
+    auto _It3 = _OverrideTextures.find((const Texture*)aPtr);
+    if (_It3 != _OverrideTextures.end() && _It3->second && _It3->second->node) {
+        return _It3->second->node;
     }
 
     auto& _ValidTextures = DynosValidTextures();
@@ -325,12 +346,10 @@ static DataNode<TexData> *DynOS_Tex_RetrieveNode(void *aPtr) {
         return (DataNode<TexData>*)aPtr;
     }
 
-    auto& _DynosCustomTexs = DynosCustomTexs();
-    for (auto &_DynosCustomTex : _DynosCustomTexs) {
-        auto& _Node = _DynosCustomTex.second;
-        if (aPtr == (void *) _Node->mData->mRawData.begin()) {
-            return _Node;
-        }
+    auto& _ByData = DynosCustomTexsByData();
+    auto _It4 = _ByData.find((const void *) aPtr);
+    if (_It4 != _ByData.end()) {
+        return _It4->second;
     }
 
     return NULL;
@@ -392,10 +411,17 @@ void DynOS_Tex_Activate(DataNode<TexData>* aNode, bool aCustomTexture) {
     // Add to custom textures
     if (!_HasCustomTex && aCustomTexture) {
         _DynosCustomTexs.emplace_back(aNode->mName.begin(), aNode);
+        if (aNode->mData) {
+            DynosCustomTexsByData()[(const void *) aNode->mData->mRawData.begin()] = aNode;
+        }
     }
 
     // Add to valid
     DynosValidTextures().insert(aNode);
+
+    // A texture pointer now resolves somewhere else; the renderer caches that
+    // resolution across frames, so tell it to redo it.
+    gfx_texture_state_invalidate();
 }
 
 void DynOS_Tex_Deactivate(DataNode<TexData>* aNode) {
@@ -411,6 +437,14 @@ void DynOS_Tex_Deactivate(DataNode<TexData>* aNode) {
             ++i;
         }
     }
+    if (aNode->mData) {
+        auto& _ByData = DynosCustomTexsByData();
+        auto _It = _ByData.find((const void *) aNode->mData->mRawData.begin());
+        if (_It != _ByData.end() && _It->second == aNode) {
+            _ByData.erase(_It);
+        }
+    }
+    gfx_texture_state_invalidate();
 
     // un-override texture
     const Texture* _BuiltinTex = DynOS_Builtin_Tex_GetFromName(aNode->mName.begin());
@@ -576,6 +610,7 @@ void DynOS_Tex_Override_Set(const char* aTexName, struct TextureInfo* aOverrideT
         auto& _DynosOverrideLuaTexData = DynosOverrideLuaTexData();
         _DynosOverrideLuaTexData[_BuiltinTexData] = _Override;
     }
+    gfx_texture_state_invalidate();
 }
 
 void DynOS_Tex_Override_Reset(const char* aTexName) {
@@ -600,11 +635,13 @@ void DynOS_Tex_Override_Reset(const char* aTexName) {
             _DynosOverrideLuaTexData.erase(_BuiltinTexData);
         }
     }
+    gfx_texture_state_invalidate();
 }
 
 void DynOS_Tex_ModShutdown() {
     auto& _DynosOverrideLuaTextures = DynosOverrideLuaTextures();
     _DynosOverrideLuaTextures.clear();
+    gfx_texture_state_invalidate();
 
     auto& _DynosCustomTexs = DynosCustomTexs();
     while (!_DynosCustomTexs.empty()) {
