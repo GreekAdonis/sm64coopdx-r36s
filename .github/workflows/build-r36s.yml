@@ -36,7 +36,14 @@ jobs:
             apt-get install -y --no-install-recommends \
               build-essential python3 libglew-dev libsdl2-dev libz-dev \
               libcurl4-openssl-dev bsdmainutils file binutils zip
-            make HANDHELD=1 DISCORD_SDK=0 UPDATER=0 \
+            # TARGET_RK3326 implies HANDHELD=1 (and DISCORD_SDK=0). Building with
+            # plain HANDHELD=1 still works, but leaves OPT_FLAGS at a generic -O2
+            # with no CPU tuning at all: on an aarch64 host the Makefile's
+            # auto-detect sets TARGET_RPI=1, and the Pi path's aarch64 branch
+            # only sets -march/-mtune if /sys/firmware/devicetree/base/model
+            # names a Pi 3 or 4 -- that file does not exist in this container, so
+            # neither sub-branch matches. TARGET_RK3326 sets -mcpu=cortex-a35.
+            make TARGET_RK3326=1 UPDATER=0 \
               EXTRA_CPP_FLAGS="-std=c++17" -j$(nproc)
             file build/us_pc/sm64coopdx.arm
             if ! file build/us_pc/sm64coopdx.arm | grep -q "ARM aarch64"; then
