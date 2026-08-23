@@ -59,10 +59,16 @@ struct LuaObjectField {
     };
 };
 
+struct LuaFieldIndex;
+
 struct LuaObjectTable {
     u16 lot;
     struct LuaObjectField* fields;
     u16 fieldCount;
+    // Lazily-built hash index over `fields`, owned by smlua_cobject.c. Left NULL
+    // by the static initializers in smlua_cobject_autogen.c and filled in on the
+    // first lookup against this table.
+    struct LuaFieldIndex* index;
 };
 
 typedef struct {

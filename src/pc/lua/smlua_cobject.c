@@ -1,3 +1,5 @@
+#include <stdlib.h>
+
 #include "smlua.h"
 
 #include "game/level_update.h"
@@ -23,8 +25,110 @@ int gSmLuaCPointers = 0;
 int gSmLuaCObjectMetatable = 0;
 int gSmLuaCPointerMetatable = 0;
 
+  ////////////////////////
+ // field lookup index //
+////////////////////////
+
+// Field lookup is the hottest path in the Lua binding: every `obj.oPosX` read
+// or written by every mod lands in smlua_get_object_field_from_ot(). The binary
+// search below costs ceil(log2(fieldCount)) strcmps -- ten of them for
+// LOT_OBJECT's 764 fields -- and each step is a dependent load into scattered
+// .rodata string literals. On a Cortex-A35 (in-order, no L3 behind a 32K L1-D)
+// those misses cannot be hidden behind other work, and the cost scales with the
+// number of mods loaded, which is exactly when the device is already struggling.
+//
+// So index the table instead: one hash, then one strcmp on the overwhelmingly
+// common path. The stored hash rejects colliding slots without touching the
+// string at all.
+//
+// Safe to cache because the field tables are static and never mutated at
+// runtime -- nothing in the tree assigns to LuaObjectTable::fields. Mod-defined
+// custom fields go through smlua_get_custom_field() instead, which is a separate
+// Lua-side table and is unaffected.
+
+#define LUA_FIELD_INDEX_MIN_FIELDS 16      // below this, binary search is already <= 4 strcmps
+#define LUA_FIELD_INDEX_EMPTY      0xFFFF
+
+struct LuaFieldIndex {
+    u32  mask;    // slotCount - 1; slotCount is always a power of two
+    u32* hashes;  // full hash per slot, so a near-miss costs no strcmp
+    u16* slots;   // index into ot->fields, or LUA_FIELD_INDEX_EMPTY
+};
+
+static u32 smlua_field_hash(const char* key) {
+    // FNV-1a. Keys are short identifiers, so this is a handful of cycles.
+    u32 h = 2166136261u;
+    while (*key) {
+        h ^= (u8) *key++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+// Builds the index for `ot` and stores it on the table. Returns NULL if the
+// table can't be indexed, in which case the caller falls back to binary search.
+static struct LuaFieldIndex* smlua_build_field_index(struct LuaObjectTable* ot) {
+    // LUA_FIELD_INDEX_EMPTY has to stay distinguishable from a real field index.
+    if (ot->fieldCount >= LUA_FIELD_INDEX_EMPTY) { return NULL; }
+
+    // Load factor of 0.5 keeps the probe chains short.
+    u32 slotCount = 16;
+    while (slotCount < (u32) ot->fieldCount * 2) { slotCount <<= 1; }
+
+    struct LuaFieldIndex* index = calloc(1, sizeof(struct LuaFieldIndex));
+    if (!index) { return NULL; }
+
+    index->hashes = calloc(slotCount, sizeof(u32));
+    index->slots  = malloc(slotCount * sizeof(u16));
+    if (!index->hashes || !index->slots) {
+        free(index->hashes);
+        free(index->slots);
+        free(index);
+        return NULL;
+    }
+
+    index->mask = slotCount - 1;
+    for (u32 i = 0; i < slotCount; i++) { index->slots[i] = LUA_FIELD_INDEX_EMPTY; }
+
+    for (u16 f = 0; f < ot->fieldCount; f++) {
+        const char* key = ot->fields[f].key;
+        if (!key) { continue; }
+        u32 hash = smlua_field_hash(key);
+        u32 i = hash & index->mask;
+        while (index->slots[i] != LUA_FIELD_INDEX_EMPTY) { i = (i + 1) & index->mask; }
+        index->slots[i]  = f;
+        index->hashes[i] = hash;
+    }
+
+    // Never freed: the tables it indexes are static globals that live for the
+    // whole process, so there is no point at which this becomes garbage.
+    ot->index = index;
+    return index;
+}
+
 struct LuaObjectField* smlua_get_object_field_from_ot(struct LuaObjectTable* ot, const char* key) {
-    // binary search
+    // Several LOTs (LOT_NONE, LOT_ARRAY, LOT_POINTER) are declared with a NULL
+    // field list. The binary search below would index fields[0] on those before
+    // testing anything.
+    if (!ot->fields || ot->fieldCount == 0) { return NULL; }
+
+    struct LuaFieldIndex* index = ot->index;
+    if (!index && ot->fieldCount >= LUA_FIELD_INDEX_MIN_FIELDS) {
+        index = smlua_build_field_index(ot);
+    }
+
+    if (index) {
+        u32 hash = smlua_field_hash(key);
+        for (u32 i = hash & index->mask; ; i = (i + 1) & index->mask) {
+            u16 slot = index->slots[i];
+            if (slot == LUA_FIELD_INDEX_EMPTY) { return NULL; }
+            if (index->hashes[i] == hash && !strcmp(key, ot->fields[slot].key)) {
+                return &ot->fields[slot];
+            }
+        }
+    }
+
+    // binary search (small tables, or the index couldn't be allocated)
     s32 min = 0;
     s32 max = ot->fieldCount - 1;
     s32 i = (min + max) / 2;
