@@ -126,7 +126,15 @@ static void gfx_sdl_init(const char *window_title) {
         SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 0);
     }
 
+#ifdef HANDHELD
+    // The window's own depth buffer only matters as a fallback for windows
+    // too small to need the low-res FBO downscale (see gfx_opengl_handheld_
+    // ensure_fbo); the FBO itself already uses a 16-bit depth renderbuffer,
+    // so match that instead of allocating a needlessly wider window surface.
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 16);
+#else
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+#endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
 #ifdef USE_GLES

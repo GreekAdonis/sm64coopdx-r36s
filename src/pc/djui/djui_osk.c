@@ -83,6 +83,7 @@ static char djui_osk_get_char(s32 row, s32 col) {
             case '.': return '-';
             case '/': return ':';
             case ',': return '_';
+            case '?': return '\'';
             default: break;
         }
 

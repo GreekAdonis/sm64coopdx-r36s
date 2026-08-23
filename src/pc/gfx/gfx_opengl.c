@@ -100,6 +100,17 @@ static bool sHandheldFboReady;
 // pass); false once G_HANDHELD_HUD_PASS_EXT has switched to rendering the HUD
 // straight to the window at native resolution for the rest of the frame.
 static bool sHandheldWorldPassActive;
+#ifdef USE_GLES
+// GL_EXT_discard_framebuffer lets us tell Mali's tile-based renderer that an
+// attachment's contents don't need to be flushed back to system RAM at the
+// end of the tile pass. Resolved via SDL_GL_GetProcAddress (not linked
+// directly): the symbol is present in the Mali driver at runtime, but cross-
+// compile toolchains commonly ship a stub libGLESv2 that doesn't export it,
+// which fails the link even though the symbol would resolve fine on-device.
+// PFNGLDISCARDFRAMEBUFFEREXTPROC comes from gl2ext.h (declared regardless of
+// GL_GLEXT_PROTOTYPES, unlike the direct glDiscardFramebufferEXT symbol).
+static PFNGLDISCARDFRAMEBUFFEREXTPROC sHandheldDiscardFramebufferEXT;
+#endif
 
 static GLuint gfx_opengl_handheld_compile_shader(GLenum type, const char *src) {
     GLuint shader = glCreateShader(type);
@@ -1055,6 +1066,11 @@ static void gfx_opengl_init(void) {
 
     glDepthFunc(GL_LEQUAL);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+#if defined(HANDHELD) && defined(USE_GLES)
+    sHandheldDiscardFramebufferEXT =
+        (PFNGLDISCARDFRAMEBUFFEREXTPROC) SDL_GL_GetProcAddress("glDiscardFramebufferEXT");
+#endif
 }
 
 bool gfx_opengl_check_compatibility(void) {
@@ -1117,6 +1133,18 @@ void gfx_opengl_handheld_end_world_pass(void) {
     GLboolean blend_was_enabled = glIsEnabled(GL_BLEND);
     GLboolean depth_was_enabled = glIsEnabled(GL_DEPTH_TEST);
 
+#ifdef USE_GLES
+    if (sHandheldDiscardFramebufferEXT) {
+        // The FBO's depth buffer is cleared fresh every frame (start_frame)
+        // and never sampled after this point, so tell the driver it doesn't
+        // need to flush it back to system RAM at the end of the tile pass --
+        // pure bandwidth saved on Mali's tile-based renderer. Must happen
+        // while sHandheldFbo is still bound, before it's unbound below.
+        const GLenum attachments[1] = { GL_DEPTH_ATTACHMENT };
+        sHandheldDiscardFramebufferEXT(GL_FRAMEBUFFER, 1, attachments);
+    }
+#endif
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, (GLsizei) sHandheldFboWindowW, (GLsizei) sHandheldFboWindowH);
     glDisable(GL_BLEND);
@@ -1155,6 +1183,17 @@ void gfx_opengl_handheld_end_world_pass(void) {
 static void gfx_opengl_finish_render(void) {
 #ifdef HANDHELD
     gfx_opengl_handheld_end_world_pass();
+#ifdef USE_GLES
+    if (sHandheldDiscardFramebufferEXT) {
+        // Nothing reads the window's own depth/stencil back: the 3D pass
+        // renders into the low-res FBO above, not the window itself, the
+        // blit and HUD both draw with depth testing off, and depth is
+        // cleared fresh every frame anyway. Discard them here, right before
+        // the next swap, so the driver skips flushing them to system RAM.
+        const GLenum attachments[2] = { GL_DEPTH_EXT, GL_STENCIL_EXT };
+        sHandheldDiscardFramebufferEXT(GL_FRAMEBUFFER, 2, attachments);
+    }
+#endif
 #endif
 }
 
