@@ -47,6 +47,11 @@ struct ShaderProgram {
     bool used_noise;
     bool used_lightmap;
     bool world_geometry;
+    // Last value of configFiltering uploaded to this program's filtering
+    // uniform, or -1 if it has never been uploaded. configFiltering only changes
+    // when the player changes a setting, but the uniform was being re-sent on
+    // every single shader switch.
+    int uploaded_filtering;
 };
 
 struct GLTexture {
@@ -299,7 +304,10 @@ static inline void gfx_opengl_set_shader_uniforms(struct ShaderProgram *prg) {
         glUniform1fv(prg->uniform_locations[7], SHADER_FLAG_MAX, gShaderFlagValues);
     }
 
-    glUniform1i(prg->uniform_locations[8], configFiltering);
+    if (prg->uploaded_filtering != (int) configFiltering) {
+        glUniform1i(prg->uniform_locations[8], configFiltering);
+        prg->uploaded_filtering = (int) configFiltering;
+    }
 }
 
 static inline void gfx_opengl_set_texture_uniforms(struct ShaderProgram *prg, const int tile) {
@@ -844,6 +852,9 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorC
     prg->used_textures[1] = ccf.used_textures[1];
     prg->num_floats = num_floats;
     prg->num_attribs = cnt;
+    // Slots in this pool are recycled, so this has to be reset per program
+    // rather than relying on zero-initialization.
+    prg->uploaded_filtering = -1;
 
     glUseProgram(shader_program);
     for (int t = 0; t < 2; t++) {

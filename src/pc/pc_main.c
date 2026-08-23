@@ -574,7 +574,20 @@ int main(int argc, char *argv[]) {
     thread5_game_loop(NULL);
 
     // Initialize the audio thread if possible.
-    // init_thread_handle(&gAudioThread, audio_thread, NULL, NULL, 0);
+    //
+    // Off by default: upstream disabled this in 50b727b41 ("disable audio
+    // threading until it seems stable") and the underlying races were never
+    // resolved. It is opt-in rather than deleted because on a quad-core A35
+    // handheld, where the game otherwise does networking, game logic, Lua,
+    // synthesis and rendering on a single core, moving the software synthesizer
+    // to a second core is the largest structural win available. The locking it
+    // needs is already in place throughout src/audio/external.c.
+    //
+    // Enable with audio_threaded=1 in sm64config.txt, and soak-test it in a
+    // mod-heavy lobby before trusting it.
+    if (configAudioThreaded) {
+        init_thread_handle(&gAudioThread, audio_thread, NULL, NULL, 0);
+    }
 
     loading_screen_reset();
 

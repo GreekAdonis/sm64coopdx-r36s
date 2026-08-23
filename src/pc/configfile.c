@@ -86,8 +86,23 @@ enum GraphicsBackend configGraphicsBackend        = GAPI_GL;
 unsigned int configFiltering                      = 2; // 0 = Nearest, 1 = Bilinear, 2 = Trilinear
 bool         configShowFPS                        = false;
 bool         configShowPing                       = false;
+#ifdef HANDHELD
+// The game simulates at 30Hz. On a 60Hz panel, RRM_AUTO makes
+// produce_interpolation_frames_and_delay() draw the scene twice per tick --
+// re-running interpolation, the whole display list and every draw call for the
+// second one. That second frame is the most expendable work in the program on a
+// device this size: it buys visual smoothness, not correctness or
+// responsiveness, and it costs roughly half of CTX_RENDER.
+//
+// So default handhelds to a locked 30. This is only a default -- Options >
+// Display still exposes Framerate Mode and Frame Limit, and setting the mode
+// back to Auto restores interpolated 60 for anyone who prefers it.
+enum RefreshRateMode configFramerateMode          = RRM_MANUAL;
+unsigned int configFrameLimit                     = 30;
+#else
 enum RefreshRateMode configFramerateMode          = RRM_AUTO;
 unsigned int configFrameLimit                     = 60;
+#endif
 unsigned int configInterpolationMode              = 1;
 unsigned int configDrawDistance                   = 6;
 #ifdef HANDHELD
@@ -102,6 +117,13 @@ unsigned int configEnvVolume                      = MAX_VOLUME;
 bool         configFadeoutDistantSounds           = false;
 bool         configMuteFocusLoss                  = false;
 unsigned int configSoundOutput                    = 0; // 0 = Stereo, 1 = Mono, 2 = Headset
+// Run audio synthesis on its own thread instead of inline in produce_one_frame().
+// The RK3326 is a quad-core A35 and the game otherwise uses one core for
+// everything, so this is the single largest structural win available on that
+// device -- but upstream disabled the audio thread in 50b727b41 ("disable audio
+// threading until it seems stable") and that concern was never resolved, so it
+// stays opt-in and off by default. Only enable it if you can soak-test it.
+bool         configAudioThreaded                  = false;
 // control binds
 static const unsigned int defaultConfigKeyA[MAX_BINDS]          = { 0x0026,     0x1000,     0x1103     };
 static const unsigned int defaultConfigKeyB[MAX_BINDS]          = { 0x0033,     0x1001,     0x1101     };
@@ -287,6 +309,7 @@ static const struct ConfigOption options[] = {
     {.name = "env_volume",                     .type = CONFIG_TYPE_UINT, .uintValue = &configEnvVolume},
     {.name = "fade_distant_sounds",            .type = CONFIG_TYPE_BOOL, .boolValue = &configFadeoutDistantSounds},
     {.name = "mute_focus_loss",                .type = CONFIG_TYPE_BOOL, .boolValue = &configMuteFocusLoss},
+    {.name = "audio_threaded",                 .type = CONFIG_TYPE_BOOL, .boolValue = &configAudioThreaded},
     {.name = "sound_output",                   .type = CONFIG_TYPE_UINT, .uintValue = &configSoundOutput},
     // control binds
     {.name = "key_a",                          .type = CONFIG_TYPE_BIND, .uintValue = configKeyA},
