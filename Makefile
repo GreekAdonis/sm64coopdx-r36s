@@ -36,6 +36,9 @@ TARGET_RPI ?= 0
 # Build and optimize for RK3588 processor
 TARGET_RK3588 ?= 0
 
+# Build and optimize for RK3326 processor (R36S, R36 Ultra X, RG351 series)
+TARGET_RK3326 ?= 0
+
 # Makeflag to enable OSX fixes
 OSX_BUILD ?= 0
 
@@ -318,6 +321,37 @@ ifeq ($(TARGET_RK3588),1)
   OPT_FLAGS := -march=armv8.2-a+crc+simd -mtune=cortex-a76 -O3
 endif
 
+ifeq ($(TARGET_RK3326),1)
+  $(info Compiling for RK3326)
+  DISCORD_SDK := 0
+  HANDHELD := 1
+
+  # NOTE: this block deliberately sits *after* the TARGET_RPI block above.
+  # On an aarch64 Linux build host the auto-detect near the top of this file
+  # sets TARGET_RPI=1, so an R36 build already goes down the Pi path and picks
+  # up USE_GLES, -lGLESv2 and the arm64 Lua/CoopNet archives from it. What it
+  # does *not* pick up is any CPU tuning: the Pi block's aarch64 branch reads
+  # /sys/firmware/devicetree/base/model looking for "3" or "4", that file does
+  # not exist inside the arm64 build container, so neither sub-branch matches
+  # and OPT_FLAGS is left at the generic -O2 default. Overriding OPT_FLAGS here
+  # is the fix; the rest of the Pi path is left alone on purpose so this stays
+  # a tuning change rather than a build-system refactor.
+  #
+  # RK3326 (R36S, R36 Ultra X, RG351 series) in ARM64 (aarch64) mode.
+  #
+  # -mcpu rather than the -march/-mtune pair the other targets use: it pins the
+  # ISA and the scheduling model together, so GCC schedules against the A35's
+  # actual in-order dual-issue pipeline instead of a generic armv8 model.
+  #
+  # -O2 rather than -O3 on purpose. The A35 has a 32K L1-I and no L3 behind it,
+  # so -O3's extra inlining and loop unrolling can cost more in instruction
+  # cache misses than it saves in branches. -O3 is worth A/B testing on-device
+  # with the ctx profiler in a mod-heavy scene, but it is not a safe default
+  # here the way it is on the A72/A76 targets above.
+  $(info ARM64 mode)
+  OPT_FLAGS := -mcpu=cortex-a35 -O2
+endif
+
 # Set BITS (32/64) to compile for
 OPT_FLAGS += $(BITS)
 
@@ -354,6 +388,15 @@ ifeq ($(TARGET_RPI),1) # Define RPi to change SDL2 title & GLES2 hints
 endif
 
 ifeq ($(TARGET_RK3588),1) # Define RK3588 to change SDL2 title & GLES2 hints
+  DEFINES += USE_GLES=1
+endif
+
+# The Mali-G31 on the RK3326 is a GLES part, so state that explicitly rather
+# than inheriting it from the aarch64 auto-detect at the top of this file, which
+# currently sets TARGET_RPI=1 on any aarch64 Linux host and gets us here by
+# accident. Same value either way -- this just stops the GLES path from
+# depending on the build host claiming to be a Raspberry Pi.
+ifeq ($(TARGET_RK3326),1)
   DEFINES += USE_GLES=1
 endif
 
@@ -729,6 +772,8 @@ else ifeq ($(TARGET_RPI),1)
   BACKEND_LDFLAGS += -lGLESv2
 else ifeq ($(TARGET_RK3588),1)
   BACKEND_LDFLAGS += -lGLESv2
+else ifeq ($(TARGET_RK3326),1)
+  BACKEND_LDFLAGS += -lGLESv2
 else ifeq ($(OSX_BUILD),1)
   BACKEND_LDFLAGS += -framework OpenGL `pkg-config --libs glew` -mmacosx-version-min=$(MIN_MACOS_VERSION)
   EXTRA_CPP_FLAGS += -stdlib=libc++ -std=c++17 -mmacosx-version-min=$(MIN_MACOS_VERSION)
@@ -812,6 +857,8 @@ else ifeq ($(TARGET_RPI),1)
   LDFLAGS := $(OPT_FLAGS) -lm $(BACKEND_LDFLAGS) -no-pie
 else ifeq ($(TARGET_RK3588),1)
   LDFLAGS := $(OPT_FLAGS) -lm $(BACKEND_LDFLAGS) -no-pie
+else ifeq ($(TARGET_RK3326),1)
+  LDFLAGS := $(OPT_FLAGS) -lm $(BACKEND_LDFLAGS) -no-pie
 else ifeq ($(OSX_BUILD),1)
   LDFLAGS := -lm $(BACKEND_LDFLAGS) -lpthread
 else
@@ -883,6 +930,8 @@ else ifeq ($(TARGET_RPI),1)
   endif
 else ifeq ($(TARGET_RK3588),1)
   LDFLAGS += -Llib/lua/linux -l:liblua53-arm64.a
+else ifeq ($(TARGET_RK3326),1)
+  LDFLAGS += -Llib/lua/linux -l:liblua53-arm64.a
 else
   LDFLAGS += -Llib/lua/linux -l:liblua53.a -ldl
 endif
@@ -914,6 +963,8 @@ ifeq ($(COOPNET),1)
     endif
   else ifeq ($(TARGET_RK3588),1)
     LDFLAGS += -Llib/coopnet/linux -l:libcoopnet-arm64.a -l:libjuice.a
+  else ifeq ($(TARGET_RK3326),1)
+    LDFLAGS += -Llib/coopnet/linux -l:libcoopnet-arm64.a -l:libjuice-arm64.a
   else
     LDFLAGS += -Llib/coopnet/linux -l:libcoopnet.a -l:libjuice.a
   endif
@@ -1030,6 +1081,11 @@ ifeq ($(TARGET_RPI),1)
 endif
 
 # Check for rk3588 option
+ifeq ($(TARGET_RK3326),1)
+  CC_CHECK_CFLAGS += -DTARGET_RK3326
+  CFLAGS += -DTARGET_RK3326
+endif
+
 ifeq ($(TARGET_RK3588),1)
   CC_CHECK_CFLAGS += -DTARGET_RK3588
   CFLAGS += -DTARGET_RK3588
