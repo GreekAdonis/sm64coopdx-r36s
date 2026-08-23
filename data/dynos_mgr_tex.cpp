@@ -1,7 +1,6 @@
 #include <map>
 #include <set>
 #include <string>
-#include <unordered_map>
 #include <vector>
 #include "dynos.cpp.h"
 extern "C" {
@@ -44,16 +43,6 @@ static std::vector<DataNode<TexData> *> &DynosScheduledInvalidTextures() {
 static std::vector<std::pair<std::string, DataNode<TexData> *>> &DynosCustomTexs() {
     static std::vector<std::pair<std::string, DataNode<TexData> *>> sDynosCustomTexs;
     return sDynosCustomTexs;
-}
-
-// DynOS_Tex_RetrieveNode() runs once per texture bind, several hundred times a
-// frame, and used to finish by walking every entry of DynosCustomTexs() looking
-// for one whose raw data starts at the pointer being resolved. Vanilla textures
-// never match, so every one of them paid for a full scan. This mirrors that
-// lookup as a hash map keyed on exactly the pointer the scan compared.
-static std::unordered_map<const void *, DataNode<TexData> *> &DynosCustomTexsByData() {
-    static std::unordered_map<const void *, DataNode<TexData> *> sDynosCustomTexsByData;
-    return sDynosCustomTexsByData;
 }
 
 static bool sDynosDumpTextureCache = false;
@@ -346,10 +335,19 @@ static DataNode<TexData> *DynOS_Tex_RetrieveNode(void *aPtr) {
         return (DataNode<TexData>*)aPtr;
     }
 
-    auto& _ByData = DynosCustomTexsByData();
-    auto _It4 = _ByData.find((const void *) aPtr);
-    if (_It4 != _ByData.end()) {
-        return _It4->second;
+    // This has to re-read mRawData.begin() on every lookup rather than caching
+    // it: TexData loads its raw pixels lazily (see DynOS_Tex_Get), so a node's
+    // raw pointer is NULL at activation time and only becomes real on first
+    // use. Any index built up front would key every PNG-backed texture under
+    // NULL and then never match the pointer the game actually draws with --
+    // which sends a custom texture down import_texture()'s vanilla path, where
+    // its RGBA32 buffer gets read as N64-format data and runs off the end.
+    auto& _DynosCustomTexs = DynosCustomTexs();
+    for (auto &_DynosCustomTex : _DynosCustomTexs) {
+        auto& _Node = _DynosCustomTex.second;
+        if (aPtr == (void *) _Node->mData->mRawData.begin()) {
+            return _Node;
+        }
     }
 
     return NULL;
@@ -411,9 +409,6 @@ void DynOS_Tex_Activate(DataNode<TexData>* aNode, bool aCustomTexture) {
     // Add to custom textures
     if (!_HasCustomTex && aCustomTexture) {
         _DynosCustomTexs.emplace_back(aNode->mName.begin(), aNode);
-        if (aNode->mData) {
-            DynosCustomTexsByData()[(const void *) aNode->mData->mRawData.begin()] = aNode;
-        }
     }
 
     // Add to valid
@@ -435,13 +430,6 @@ void DynOS_Tex_Deactivate(DataNode<TexData>* aNode) {
             _DynosCustomTexs.erase(_DynosCustomTexs.begin() + i);
         } else {
             ++i;
-        }
-    }
-    if (aNode->mData) {
-        auto& _ByData = DynosCustomTexsByData();
-        auto _It = _ByData.find((const void *) aNode->mData->mRawData.begin());
-        if (_It != _ByData.end() && _It->second == aNode) {
-            _ByData.erase(_It);
         }
     }
     gfx_texture_state_invalidate();

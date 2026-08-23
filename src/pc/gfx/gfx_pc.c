@@ -2597,6 +2597,15 @@ void OPTIMIZE_O3 ext_gfx_run_dl(Gfx* cmd) {
         case G_HANDHELD_HUD_PASS_EXT:
             gfx_flush();
             gfx_opengl_handheld_end_world_pass();
+            // The blit binds the FBO colour texture to unit 0 behind
+            // select_texture()'s back and clears its cached binding so the next
+            // select_texture() rebinds. That only works if a select_texture()
+            // actually happens -- and the tile-descriptor guards above will
+            // happily skip the import when the HUD re-states a texture the
+            // world pass already had. Force one re-import so the HUD does not
+            // draw itself with the framebuffer it just blitted.
+            rdp.textures_changed[0] = true;
+            rdp.textures_changed[1] = true;
             break;
 #endif
     }
