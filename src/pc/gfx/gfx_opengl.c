@@ -266,6 +266,11 @@ static void gfx_opengl_handheld_ensure_fbo(uint32_t window_w, uint32_t window_h)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glBindRenderbuffer(GL_RENDERBUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
+    // Bypasses select_texture()'s tile bookkeeping (and we don't know which
+    // unit was active), so drop both cached tiles rather than risk
+    // select_texture() trusting a unit that's actually unbound now.
+    opengl_tex[0] = NULL;
+    opengl_tex[1] = NULL;
 
     if (status != GL_FRAMEBUFFER_COMPLETE) {
         fprintf(stderr, "handheld internal-resolution FBO incomplete (0x%x); rendering at native resolution\n", status);
@@ -928,14 +933,47 @@ static GLuint gfx_opengl_new_texture(void) {
 }
 
 static void gfx_opengl_select_texture(int tile, GLuint texture_id) {
-    opengl_tex[tile] = tex_cache + texture_id;
+    struct GLTexture *tex = tex_cache + texture_id;
+    if (opengl_tex[tile] == tex) {
+        // Already bound to this unit -- the uniforms are already consistent
+        // with it too, since a shader change re-pushes them for whatever's
+        // currently in opengl_tex[tile] (see gfx_opengl_load_shader). Skipping
+        // the redundant glActiveTexture/glBindTexture pair matters on tile-based
+        // mobile GPUs (Mali), where a rebind can flush pending FBO work early.
+        opengl_curtex = tile;
+        return;
+    }
+    opengl_tex[tile] = tex;
     opengl_curtex = tile;
     glActiveTexture(GL_TEXTURE0 + tile);
-    glBindTexture(GL_TEXTURE_2D, opengl_tex[tile]->gltex);
+    glBindTexture(GL_TEXTURE_2D, tex->gltex);
     gfx_opengl_set_texture_uniforms(opengl_prg, tile);
 }
 
 static void gfx_opengl_upload_texture(const uint8_t *rgba32_buf, int width, int height) {
+#if defined(HANDHELD) && defined(USE_GLES)
+    // The G31 is bandwidth-starved, and N64 texture data never carried more
+    // than 5-6 bits of colour precision per channel to begin with (see the
+    // SCALE_x_8 upscales in gfx_pc.c's import_texture_* functions), so
+    // repacking to RGBA5551 here roughly halves upload bandwidth and texture
+    // memory footprint at no visible cost. Bounded by the largest rgba32_buf
+    // any import_texture_* in gfx_pc.c can produce (0x8000 bytes = 8192 texels).
+    size_t num_pixels = (size_t)width * (size_t)height;
+    uint16_t buf16[8192];
+    if (num_pixels <= sizeof(buf16) / sizeof(buf16[0])) {
+        for (size_t i = 0; i < num_pixels; i++) {
+            uint8_t r = rgba32_buf[4 * i + 0];
+            uint8_t g = rgba32_buf[4 * i + 1];
+            uint8_t b = rgba32_buf[4 * i + 2];
+            uint8_t a = rgba32_buf[4 * i + 3];
+            buf16[i] = (uint16_t)(((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | (a >> 7));
+        }
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, buf16);
+        opengl_tex[opengl_curtex]->size[0] = width;
+        opengl_tex[opengl_curtex]->size[1] = height;
+        return;
+    }
+#endif
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba32_buf);
     opengl_tex[opengl_curtex]->size[0] = width;
     opengl_tex[opengl_curtex]->size[1] = height;
@@ -1021,7 +1059,14 @@ static void gfx_opengl_set_use_alpha(bool use_alpha) {
 
 static void gfx_opengl_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
     //printf("flushing %d tris\n", buf_vbo_num_tris);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * buf_vbo_len, buf_vbo, GL_STREAM_DRAW);
+    const GLsizeiptr size = (GLsizeiptr)(sizeof(float) * buf_vbo_len);
+    // Explicitly orphan the previous store before uploading new data: this
+    // tells the driver it can hand back a fresh allocation immediately instead
+    // of stalling the CPU until the GPU is done reading the old contents from
+    // the last draw. Some mobile drivers (Mali included) don't reliably infer
+    // this from a same-size glBufferData(..., data, ...) call on its own.
+    glBufferData(GL_ARRAY_BUFFER, size, NULL, GL_STREAM_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, size, buf_vbo, GL_STREAM_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, 3 * buf_vbo_num_tris);
 }
 
@@ -1169,6 +1214,10 @@ void gfx_opengl_handheld_end_world_pass(void) {
                 (float) sHandheldFboWindowH / (float) sHandheldFboH);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, sHandheldColorTex);
+    // This bind bypasses select_texture()'s tile bookkeeping, so whatever it
+    // thinks is bound to unit 0 is now wrong -- force the next select_texture(0, ...)
+    // to actually rebind instead of trusting its (now stale) cache.
+    opengl_tex[0] = NULL;
 
     static const float kBlitQuad[8] = { -1.0f, -1.0f,  1.0f, -1.0f,  -1.0f, 1.0f,  1.0f, 1.0f };
     glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);

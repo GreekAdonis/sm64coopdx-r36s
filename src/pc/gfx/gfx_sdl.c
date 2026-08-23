@@ -138,7 +138,13 @@ static void gfx_sdl_init(const char *window_title) {
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
 #ifdef USE_GLES
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);  // These attributes allow for hardware acceleration on RPis.
+    // Ask for ES 3.0 first -- shaders are still written against GLSL ES 100
+    // (an ES 3.x context accepts those unchanged), but a 3.x context is a
+    // prerequisite for later moving to VAOs / glMapBufferRange and is free
+    // on any driver that supports it (confirmed on the Mali-G31 blob, which
+    // advertises ES 3.2). Older GLES2-only drivers reject context creation
+    // outright, so fall back to 2.0 below rather than assuming support.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
 #endif
@@ -152,6 +158,16 @@ static void gfx_sdl_init(const char *window_title) {
         SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
     );
     ctx = SDL_GL_CreateContext(wnd);
+
+#ifdef USE_GLES
+    if (!ctx) {
+        // Driver doesn't support ES 3.0 -- retry with the ES 2.0 request
+        // that worked before this change.
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+        ctx = SDL_GL_CreateContext(wnd);
+    }
+#endif
 
     gfx_sdl_set_vsync(configWindow.vsync);
 
