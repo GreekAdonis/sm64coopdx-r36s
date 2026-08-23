@@ -701,7 +701,91 @@ u32 smlua_get_action_interaction_type(struct MarioState* m) {
 
 struct GrowingArray *gHookedBehaviors = NULL;
 
+  ///////////////////////////////////
+ // hooked behavior lookup index  //
+///////////////////////////////////
+
+// smlua_call_behavior_hook() runs for every object on every frame, and this
+// lookup used to be a linear scan of every hooked behavior. With a few hundred
+// objects and a mod that hooks a handful of behaviours it measured ~1% of the
+// entire main thread -- all of it re-deriving an answer that only changes when
+// mods load. Worse, the overwhelmingly common outcome is "not hooked", which is
+// exactly the case the scan pays full price for.
+//
+// Two lookups cover every id the scan could match:
+//   - Custom ids are handed out densely as LUA_BEHAVIOR_START + count, so a
+//     custom id is its own index into the array.
+//   - Vanilla ids (< id_bhv_max_count) get a small direct-mapped table.
+//
+// Entries are only ever appended (smlua_clear_hooks() resets the array
+// wholesale), and behaviorId/customId are assigned immediately after the
+// allocation and never mutated, so tracking the count is enough to know the
+// index is current. Every hit is verified against the entry before being
+// returned, so even a stale index can only cost a fallback scan -- never a
+// wrong behaviour.
+
+#define LUA_BHV_INDEX_NONE 0xFFFF
+
+static u16 sHookedBhvByVanillaId[id_bhv_max_count];
+static u32 sHookedBhvIndexCount = (u32) -1;
+
+static void smlua_rebuild_hooked_behavior_index(void) {
+    for (u32 i = 0; i < (u32) id_bhv_max_count; i++) {
+        sHookedBhvByVanillaId[i] = LUA_BHV_INDEX_NONE;
+    }
+
+    u32 count = gHookedBehaviors ? gHookedBehaviors->count : 0;
+    for (u32 i = 0; i < count; i++) {
+        struct LuaHookedBehavior* hooked = gHookedBehaviors->buffer[i];
+        if (!hooked) { continue; }
+        // First writer wins, matching the scan order this replaces.
+        if (hooked->behaviorId < id_bhv_max_count
+            && sHookedBhvByVanillaId[hooked->behaviorId] == LUA_BHV_INDEX_NONE) {
+            sHookedBhvByVanillaId[hooked->behaviorId] = (u16) i;
+        }
+    }
+
+    sHookedBhvIndexCount = count;
+}
+
+static void smlua_invalidate_hooked_behavior_index(void) {
+    sHookedBhvIndexCount = (u32) -1;
+}
+
 static struct LuaHookedBehavior *smlua_find_hooked_behavior(enum BehaviorId id) {
+    if (!gHookedBehaviors) { return NULL; }
+
+    u32 count = gHookedBehaviors->count;
+    if (count == 0) { return NULL; }
+
+    if (sHookedBhvIndexCount != count) { smlua_rebuild_hooked_behavior_index(); }
+
+    if (id >= LUA_BEHAVIOR_START) {
+        // A custom id is its own index.
+        u32 i = (u32) id - LUA_BEHAVIOR_START;
+        if (i < count) {
+            struct LuaHookedBehavior* hooked = gHookedBehaviors->buffer[i];
+            if (hooked && (hooked->customId == id || hooked->behaviorId == id)) {
+                return hooked;
+            }
+        }
+    } else if (id < id_bhv_max_count) {
+        u16 i = sHookedBhvByVanillaId[id];
+        if (i == LUA_BHV_INDEX_NONE) {
+            // The table was just rebuilt from the full array, so no entry here
+            // means nothing claims this id. This is the hot path: most objects
+            // in a scene run a behaviour no mod has hooked.
+            return NULL;
+        }
+        if (i < count) {
+            struct LuaHookedBehavior* hooked = gHookedBehaviors->buffer[i];
+            if (hooked && (hooked->behaviorId == id || hooked->customId == id)) {
+                return hooked;
+            }
+        }
+    }
+
+    // Ids that fall between the two ranges, or a hit that failed verification.
     growing_array_for_each_(gHookedBehaviors, struct LuaHookedBehavior, hooked) {
         if (hooked->behaviorId == id || hooked->customId == id) {
             return hooked;
@@ -1954,6 +2038,7 @@ void smlua_clear_hooks(void) {
         growing_array_free(&hooked->loopCallbacks);
     }
     gHookedBehaviors = growing_array_init(gHookedBehaviors, 16, malloc, free);
+    smlua_invalidate_hooked_behavior_index();
 }
 
 void smlua_bind_hooks(void) {

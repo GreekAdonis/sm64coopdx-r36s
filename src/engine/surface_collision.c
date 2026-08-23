@@ -618,6 +618,13 @@ static struct Surface *find_floor_from_list(struct SurfaceNode *surfaceNode, s32
     struct Surface *floor = NULL;
     s32 interpolate;
 
+    // Hoisted out of the loop: these are globals, so the compiler has to reload
+    // them on every iteration across the calls in the body even though nothing
+    // here writes them. This is the hottest loop in collision -- it was 3.5% of
+    // the whole main thread in a profile of a busy multiplayer session.
+    const s32 interpolatingSurfaces = gInterpolatingSurfaces;
+    struct Object* const collisionObject = gCheckingSurfaceCollisionsForObject;
+
     // set pheight to lowest value
     if (gLevelValues.fixCollisionBugs) {
         *pheight = gLevelValues.floorLowerLimit;
@@ -628,14 +635,29 @@ static struct Surface *find_floor_from_list(struct SurfaceNode *surfaceNode, s32
         surf = surfaceNode->surface;
         if (surf == NULL) { break; }
         surfaceNode = surfaceNode->next;
-        interpolate = gInterpolatingSurfaces;
+        interpolate = interpolatingSurfaces;
 
         if (surf->flags & SURFACE_FLAG_INTANGIBLE) { continue; }
-        if (gCheckingSurfaceCollisionsForObject != NULL) {
-            if (surf->object != gCheckingSurfaceCollisionsForObject) {
+        if (collisionObject != NULL) {
+            if (surf->object != collisionObject) {
                 continue;
             }
         }
+
+        // Reject floors that sit entirely above the point before doing any of
+        // the triangle work. lowerY is minY - 5 (surface_load.c), so a surface
+        // with lowerY > y + 78 has minY > y + 78 and therefore a plane height
+        // above y + 78 anywhere inside its own footprint -- which is exactly
+        // the condition the "78 unit buffer" test at the bottom of the loop
+        // rejects on. Points outside the footprint are rejected by the
+        // containment tests below regardless, so this can only skip surfaces
+        // the loop already skipped.
+        //
+        // Only valid when surfaces are not being interpolated: lowerY/upperY
+        // are computed from the loaded vertices, which the interpolated path
+        // below does not use. Interpolation only runs while building shadows at
+        // render time, never on the gameplay collision path.
+        if (!interpolate && surf->lowerY > y + 78) { continue; }
 
         x1 = surf->vertex1[0];
         z1 = surf->vertex1[2];
