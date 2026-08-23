@@ -50,6 +50,7 @@ static bool joy_buttons[MAX_JOYBUTTONS] = { false };
 static u32 last_mouse = VK_INVALID;
 static u32 last_joybutton = VK_INVALID;
 static u32 last_gamepad = 0;
+static u32 sHeldWhileChatFocused = 0;
 
 static s16 invert_s16(s16 val) {
     if (val == -0x8000) return 0x7FFF;
@@ -316,6 +317,14 @@ static void controller_sdl_read(OSContPad *pad) {
     if (configStick.invertRightX) { rightx = invert_s16(rightx); }
     if (configStick.invertRightY) { righty = invert_s16(righty); }
 
+    if (gDjuiChatBoxFocus) {
+        // Give the right stick to chat scrolling instead of the camera while
+        // chat is open -- camera control isn't needed while reading/typing chat.
+        djui_chat_box_scroll_stick((s8)(-righty / 0x100));
+        rightx = 0;
+        righty = 0;
+    }
+
     update_button(VK_LTRIGGER - VK_BASE_SDL_GAMEPAD, ltrig > AXIS_THRESHOLD);
     update_button(VK_RTRIGGER - VK_BASE_SDL_GAMEPAD, rtrig > AXIS_THRESHOLD);
 
@@ -324,8 +333,19 @@ static void controller_sdl_read(OSContPad *pad) {
             buttons_down |= joy_binds[i][1];
 
     // Trap D-pad/button presses while chat is focused so they don't also act as
-    // gameplay input; sticks (movement/camera) are read separately below and stay live.
-    if (gDjuiChatBoxFocus) { buttons_down = 0; }
+    // gameplay input; the left stick (movement) is read separately below and stays
+    // live, while the right stick is diverted to chat scrolling above.
+    u32 rawButtonsDown = buttons_down;
+    if (gDjuiChatBoxFocus) {
+        // Remember which buttons are held so the same physical press can't leak
+        // through as a fresh gameplay press the instant chat closes and focus
+        // drops (e.g. holding A on OSK "OK" would otherwise also trigger a jump).
+        sHeldWhileChatFocused |= rawButtonsDown;
+        buttons_down = 0;
+    } else {
+        buttons_down &= ~sHeldWhileChatFocused;
+    }
+    sHeldWhileChatFocused &= rawButtonsDown;
 
     pad->button |= buttons_down;
 

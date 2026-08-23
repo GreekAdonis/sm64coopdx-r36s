@@ -511,6 +511,24 @@ static void djui_chat_box_input_on_scroll(UNUSED struct DjuiBase *base, UNUSED f
     }
 }
 
+// Scrolls the chat log from a right-stick Y value (N64-style: positive = up).
+// Called every frame while chat is focused, in place of camera control, since
+// the right stick isn't needed for the camera while reading/typing chat.
+void djui_chat_box_scroll_stick(s8 stickY) {
+    if (gDjuiChatBox == NULL || !gDjuiChatBoxFocus) { return; }
+
+    const f32 deadzone = 24.f;
+    f32 y = (f32)stickY;
+    if (absx(y) <= deadzone) { return; }
+
+    f32 magnitude = (absx(y) - deadzone) / (127.f - deadzone);
+    gDjuiChatBox->scrollY += (y < 0.f ? -1.f : 1.f) * magnitude * 10.f;
+
+    if (!gDjuiChatBox->scrolling) {
+        gDjuiChatBox->scrolling = gDjuiChatBox->scrollY < 0.f;
+    }
+}
+
 void djui_chat_box_toggle(void) {
     if (gDjuiChatBox == NULL) { return; }
     if (!gDjuiChatBoxFocus) { sDjuiChatBoxClearText = true; }

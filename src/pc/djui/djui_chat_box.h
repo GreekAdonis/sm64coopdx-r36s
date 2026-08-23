@@ -15,4 +15,5 @@ extern bool gDjuiChatBoxFocus;
 
 void djui_chat_box_toggle(void);
 void djui_chat_box_close(void);
+void djui_chat_box_scroll_stick(s8 stickY);
 struct DjuiChatBox* djui_chat_box_create(void);

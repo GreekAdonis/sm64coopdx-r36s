@@ -39,7 +39,7 @@ static const char* sOskCharRows[OSK_ROWS - 1] = {
     "1234567890",
     "qwertyuiop",
     "asdfghjkl.",
-    "zxcvbnm-:_",
+    "zxcvbnm?/,",
 };
 
 static const struct OskKey sOskBottomRow[OSK_COLS] = {
@@ -80,8 +80,9 @@ static char djui_osk_get_char(s32 row, s32 col) {
             case '8': return '*';
             case '9': return '(';
             case '0': return ')';
-            case '.': return '>';
-            case '-': return '_';
+            case '.': return '-';
+            case '/': return ':';
+            case ',': return '_';
             default: break;
         }
 
@@ -307,9 +308,19 @@ void djui_osk_render(void) {
     f32 pad = 4.0f;
     f32 panelH = OSK_ROWS * keyH + (OSK_ROWS - 1) * gap + 2.0f * pad;
     f32 x0 = margin;
-    // Anchored to the top of the screen, not the bottom, so it doesn't cover
-    // the chat input box (which is bottom-aligned).
+
+    // Default to the top of the screen (out of the way of the bottom-aligned
+    // chat box), but if the focused input itself sits in the top half of the
+    // screen (e.g. a menu textbox), draw at the bottom instead so the
+    // keyboard doesn't cover it. A textbox near the vertical center of the
+    // screen may still end up partially covered either way.
     f32 y0 = margin;
+    if (gInteractableFocus != NULL) {
+        f32 focusCenterY = gInteractableFocus->comp.y + gInteractableFocus->comp.height * 0.5f;
+        if (focusCenterY < sh * 0.5f) {
+            y0 = sh - panelH - margin;
+        }
+    }
 
     djui_hud_set_font(FONT_ALIASED);
     djui_hud_set_text_alignment(0.5f, 0.5f);
