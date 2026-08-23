@@ -40,7 +40,8 @@ TIMINGS = [
 ]
 
 COUNTERS = ["subframes", "draws", "tris", "verts", "texloads", "texbytes",
-            "texflushes", "binds", "bindskips", "shaders", "objects", "players"]
+            "texflushes", "binds", "bindskips", "impskips", "shaders", "objects",
+            "players"]
 
 # Why each batch split happened. Absent from older logs; the printer skips
 # whatever a given CSV does not carry.

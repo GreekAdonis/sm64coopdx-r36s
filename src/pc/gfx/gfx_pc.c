@@ -176,6 +176,55 @@ static uint32_t sSeenTextureGeneration = 0;
 
 void gfx_texture_state_invalidate(void) {
     gGfxTextureGeneration++;
+    // Also drop the per-tile import memo below by forcing the flag: callers
+    // reach here because something changed what a texture pointer resolves to,
+    // or because the backend dropped a binding we would otherwise assume is
+    // still live.
+    for (size_t i = 0; i < MAX_TEXTURES; i++) { rdp.textures_changed[i] = true; }
+}
+
+// What import_texture() actually consumes for a tile. If every one of these is
+// unchanged since the last completed import, the import is guaranteed to
+// resolve to the texture already bound: gfx_texture_cache_lookup() keys on
+// addr/fmt/siz alone, and the DynOS path keys on the node those resolve to.
+//
+// This matters because the descriptor guards upstream can only suppress a
+// *bit-identical* tile write. A scrolling texture re-stating tile 0's size
+// every frame changes the descriptor for real, so it gets through, and the
+// import then resolves to the same texture anyway -- after a gfx_flush() has
+// already split the batch. Measured on device, 55% of every draw call in a
+// busy multiplayer frame was a rebind of the texture already bound.
+struct TextureImportKey {
+    const uint8_t* addr;
+    uint32_t sizeBytes;
+    uint32_t lineSizeBytes;
+    uint32_t generation;
+    uint8_t  fmt;
+    uint8_t  siz;
+    bool     valid;
+};
+static struct TextureImportKey sLastImport[MAX_TEXTURES];
+
+static bool gfx_texture_import_would_be_noop(int tile) {
+    const struct TextureImportKey* k = &sLastImport[tile];
+    return k->valid
+        && k->generation    == gGfxTextureGeneration
+        && k->addr          == rdp.loaded_texture[tile].addr
+        && k->sizeBytes     == rdp.loaded_texture[tile].size_bytes
+        && k->lineSizeBytes == rdp.texture_tile[tile].line_size_bytes
+        && k->fmt           == rdp.texture_tile[tile].fmt
+        && k->siz           == rdp.texture_tile[tile].siz;
+}
+
+static void gfx_texture_import_remember(int tile) {
+    struct TextureImportKey* k = &sLastImport[tile];
+    k->addr          = rdp.loaded_texture[tile].addr;
+    k->sizeBytes     = rdp.loaded_texture[tile].size_bytes;
+    k->lineSizeBytes = rdp.texture_tile[tile].line_size_bytes;
+    k->generation    = gGfxTextureGeneration;
+    k->fmt           = rdp.texture_tile[tile].fmt;
+    k->siz           = rdp.texture_tile[tile].siz;
+    k->valid         = true;
 }
 
 static void gfx_update_loaded_texture(uint8_t tile_number, uint32_t size_bytes, const uint8_t* addr) {
@@ -380,6 +429,9 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     if (gfx_texture_cache.pool_pos >= sizeof(gfx_texture_cache.pool) / sizeof(struct TextureHashmapNode)) {
         // Pool is full. We just invalidate everything and start over.
         PROFILE_ADD(texCacheFlushes, 1);
+        // Every node is about to be recycled onto different texture ids, so no
+        // memo of a previous import can be trusted.
+        gfx_texture_state_invalidate();
         gfx_texture_cache.pool_pos = 0;
         node = &gfx_texture_cache.hashmap[hash];
         // puts("Clearing texture cache");
@@ -1269,8 +1321,14 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
     for (int32_t i = 0; i < 2; i++) {
         if (used_textures[i]) {
             if (rdp.textures_changed[i]) {
-                FLUSH_FOR(flushTexture);
-                import_texture(i);
+                if (gfx_texture_import_would_be_noop(i)) {
+                    // Nothing to do, and crucially nothing to flush for.
+                    PROFILE_ADD(texImportSkips, 1);
+                } else {
+                    FLUSH_FOR(flushTexture);
+                    import_texture(i);
+                    gfx_texture_import_remember(i);
+                }
                 rdp.textures_changed[i] = false;
             }
             bool linear_filter = configFiltering && ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT);
@@ -2634,8 +2692,7 @@ void OPTIMIZE_O3 ext_gfx_run_dl(Gfx* cmd) {
             // happily skip the import when the HUD re-states a texture the
             // world pass already had. Force one re-import so the HUD does not
             // draw itself with the framebuffer it just blitted.
-            rdp.textures_changed[0] = true;
-            rdp.textures_changed[1] = true;
+            gfx_texture_state_invalidate();
             break;
 #endif
     }

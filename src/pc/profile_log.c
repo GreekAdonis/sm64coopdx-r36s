@@ -70,7 +70,7 @@ void profile_log_init(void) {
             "us_total,us_net,us_interp,us_game,us_levelscript,us_objects,us_geo,"
             "us_smlua,us_hook,us_audio,us_render,us_gfxdl,us_lighting,us_texupload,"
             "us_swap,us_delay,"
-            "draws,tris,verts,texloads,texbytes,texflushes,binds,bindskips,shaders,"
+            "draws,tris,verts,texloads,texbytes,texflushes,binds,bindskips,impskips,shaders,"
             "fldepth,flviewport,flshader,flalpha,fltexture,flsampler,flfull,flcomb,"
             "mario_x,mario_y,mario_z\n");
 
@@ -103,7 +103,7 @@ void profile_log_frame(void) {
             "%d,%d,%d,%d,%d,%d,%d,"
             "%d,%d,%d,%d,%d,%d,%d,"
             "%d,%d,"
-            "%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+            "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
             "%u,%u,%u,%u,%u,%u,%u,%u,"
             "%d,%d,%d\n",
             (unsigned long long)sFrame,
@@ -127,7 +127,7 @@ void profile_log_frame(void) {
             profile_ctx_us(CTX_SWAP),
             profile_ctx_us(CTX_DELAY),
             c->drawCalls, c->tris, c->verts, c->texLoads, c->texBytes,
-            c->texCacheFlushes, c->texBinds, c->texBindSkips, c->shaderLoads,
+            c->texCacheFlushes, c->texBinds, c->texBindSkips, c->texImportSkips, c->shaderLoads,
             c->flushDepth, c->flushViewport, c->flushShader, c->flushAlpha,
             c->flushTexture, c->flushSampler, c->flushBufferFull, c->flushCombiner,
             (int)m->pos[0], (int)m->pos[1], (int)m->pos[2]);

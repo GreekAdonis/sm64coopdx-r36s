@@ -273,6 +273,9 @@ static void gfx_opengl_handheld_ensure_fbo(uint32_t window_w, uint32_t window_h)
     // select_texture() trusting a unit that's actually unbound now.
     opengl_tex[0] = NULL;
     opengl_tex[1] = NULL;
+    // gfx_pc.c skips imports it can prove are no-ops, which means it will not
+    // re-issue select_texture() on its own. Tell it the binding is gone.
+    gfx_texture_state_invalidate();
 
     if (status != GL_FRAMEBUFFER_COMPLETE) {
         fprintf(stderr, "handheld internal-resolution FBO incomplete (0x%x); rendering at native resolution\n", status);
@@ -929,6 +932,7 @@ static GLuint gfx_opengl_new_texture(void) {
         // invalidate these because they might be pointing to garbage now
         opengl_tex[0] = NULL;
         opengl_tex[1] = NULL;
+        gfx_texture_state_invalidate();
     }
     glGenTextures(1, &tex_cache[num_textures].gltex);
     return num_textures++;
@@ -1227,6 +1231,7 @@ void gfx_opengl_handheld_end_world_pass(void) {
     // thinks is bound to unit 0 is now wrong -- force the next select_texture(0, ...)
     // to actually rebind instead of trusting its (now stale) cache.
     opengl_tex[0] = NULL;
+    gfx_texture_state_invalidate();
 
     static const float kBlitQuad[8] = { -1.0f, -1.0f,  1.0f, -1.0f,  -1.0f, 1.0f,  1.0f, 1.0f };
     glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);

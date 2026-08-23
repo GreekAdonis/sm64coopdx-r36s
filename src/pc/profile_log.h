@@ -20,6 +20,7 @@ struct ProfileCounters {
     u32 texCacheFlushes; // whole-cache invalidations (pool ran full)
     u32 texBinds;        // real glBindTexture calls
     u32 texBindSkips;    // binds skipped by the bind cache
+    u32 texImportSkips;  // imports elided as provably no-ops (no batch split)
     u32 shaderLoads;     // shader program switches
     u32 subFrames;       // rendered frames produced for this game frame
 
