@@ -223,7 +223,9 @@ bool         configLuaProfiler                    = false;
 bool         configDebugPrint                     = false;
 bool         configDebugInfo                      = false;
 bool         configDebugError                     = false;
-#ifdef DEVELOPMENT
+#if defined(DEVELOPMENT) || defined(PROFILE_BUILD)
+// a FRAME_PROFILE build has no debug menu to tick this in, so it is set
+// through sm64config.txt ("ctx_profiler true") to get the on-screen breakdown
 bool         configCtxProfiler                    = false;
 #endif
 // player settings
@@ -384,7 +386,7 @@ static const struct ConfigOption options[] = {
     {.name = "debug_print",                    .type = CONFIG_TYPE_BOOL, .boolValue   = &configDebugPrint},
     {.name = "debug_info",                     .type = CONFIG_TYPE_BOOL, .boolValue   = &configDebugInfo},
     {.name = "debug_error",                    .type = CONFIG_TYPE_BOOL, .boolValue   = &configDebugError},
-#ifdef DEVELOPMENT
+#if defined(DEVELOPMENT) || defined(PROFILE_BUILD)
     {.name = "ctx_profiler",                   .type = CONFIG_TYPE_BOOL, .boolValue   = &configCtxProfiler},
 #endif
     // player settings

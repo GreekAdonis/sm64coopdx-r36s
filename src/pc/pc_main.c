@@ -51,6 +51,7 @@
 #include "pc/mods/mods.h"
 
 #include "debug_context.h"
+#include "profile_log.h"
 #include "menu/intro_geo.h"
 
 #include "gfx_dimensions.h"
@@ -291,10 +292,19 @@ void produce_interpolation_frames_and_delay(void) {
         gRenderingDelta = delta;
 
         gfx_start_frame();
-        if (!gSkipInterpolationTitleScreen) { patch_interpolations(delta); }
+        if (!gSkipInterpolationTitleScreen) {
+            CTX_BEGIN_TIMED(CTX_INTERP);
+            patch_interpolations(delta);
+            CTX_END_TIMED(CTX_INTERP);
+        }
+        CTX_BEGIN_TIMED(CTX_GFX_DL);
         send_display_list(gGfxSPTask);
         gfx_end_frame_render();
+        CTX_END_TIMED(CTX_GFX_DL);
+        CTX_BEGIN_TIMED(CTX_SWAP);
         gfx_display_frame();
+        CTX_END_TIMED(CTX_SWAP);
+        PROFILE_ADD(subFrames, 1);
 
         // delay if our framerate is capped
         if (shouldDelay) {
@@ -303,7 +313,9 @@ void produce_interpolation_frames_and_delay(void) {
             f64 elapsedTime = now - loopStartTime;
             f64 delay = (expectedTime - elapsedTime);
             if (delay > 0.0) {
+                CTX_BEGIN_TIMED(CTX_DELAY);
                 precise_delay_f64(delay);
+                CTX_END_TIMED(CTX_DELAY);
             }
         }
 
@@ -630,6 +642,9 @@ int main(int argc, char *argv[]) {
         network_init(NT_NONE, false);
     }
 
+    // opens the CSV and starts the sampler; no-op unless built with PROFILE=1
+    profile_log_init();
+
     // main loop
     while (true) {
         debug_context_reset();
@@ -645,7 +660,9 @@ int main(int argc, char *argv[]) {
 #endif
         CTX_END(CTX_TOTAL);
 
-#ifdef DEVELOPMENT
+        profile_log_frame();
+
+#ifdef CTX_TIMING_ENABLED
         djui_ctx_display_update();
 #endif
         djui_lua_profiler_update();

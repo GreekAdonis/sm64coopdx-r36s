@@ -28,6 +28,7 @@
 
 #include "pc/configfile.h"
 #include "pc/debug_context.h"
+#include "pc/profile_log.h"
 #include "pc/pc_main.h"
 #include "pc/platform.h"
 
@@ -189,6 +190,8 @@ void ext_gfx_run_dl(Gfx* cmd);
 
 static void gfx_flush(void) {
     if (buf_vbo_len > 0) {
+        PROFILE_ADD(drawCalls, 1);
+        PROFILE_ADD(tris, buf_vbo_num_tris);
         gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
         buf_vbo_len = 0;
         buf_vbo_num_tris = 0;
@@ -346,6 +349,7 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     }
     if (gfx_texture_cache.pool_pos >= sizeof(gfx_texture_cache.pool) / sizeof(struct TextureHashmapNode)) {
         // Pool is full. We just invalidate everything and start over.
+        PROFILE_ADD(texCacheFlushes, 1);
         gfx_texture_cache.pool_pos = 0;
         node = &gfx_texture_cache.hashmap[hash];
         // puts("Clearing texture cache");
@@ -365,6 +369,7 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     (*node)->cmt = 0;
     (*node)->linear_filter = false;
     *n = *node;
+    PROFILE_ADD(texLoads, 1);
     return false;
     #undef CMPADDR
 }
@@ -770,6 +775,8 @@ static OPTIMIZE_O3 void gfx_local_to_world_space(VEC_OUT Vec3f pos, VEC_OUT Vec3
 
 static void OPTIMIZE_O3 gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *vertices, bool luaVertexColor) {
     if (!vertices) { return; }
+
+    PROFILE_ADD(verts, n_vertices);
 
     Vec3f globalLightCached[2];
     Vec3f vertexColorCached;
@@ -1214,6 +1221,7 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
 
     struct ShaderProgram *prg = comb->prg;
     if (prg != rendering_state.shader_program) {
+        PROFILE_ADD(shaderLoads, 1);
         gfx_flush();
         gfx_rapi->unload_shader(rendering_state.shader_program);
         gfx_rapi->load_shader(prg);

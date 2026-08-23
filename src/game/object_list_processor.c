@@ -26,6 +26,7 @@
 #include "pc/network/network.h"
 #include "pc/lua/smlua.h"
 #include "pc/djui/djui_hud_utils.h"
+#include "pc/debug_context.h"
 
 /**
  * Flags controlling what debug info is displayed.
@@ -680,6 +681,8 @@ UNUSED static u16 unused_get_elapsed_time(u64 *cycleCounts, s32 index) {
 void update_objects(UNUSED s32 unused) {
     s64 cycleCounts[30];
 
+    CTX_BEGIN_TIMED(CTX_OBJECTS);
+
     cycleCounts[0] = get_current_clock();
 
     gTimeStopState &= ~TIME_STOP_MARIO_OPENED_DOOR;
@@ -737,4 +740,6 @@ void update_objects(UNUSED s32 unused) {
     }
 
     gPrevFrameObjectCount = gObjectCounter;
+
+    CTX_END_TIMED(CTX_OBJECTS);
 }

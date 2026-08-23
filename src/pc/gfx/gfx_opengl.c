@@ -31,6 +31,8 @@
 #include "gfx_cc.h"
 #include "gfx_rendering_api.h"
 #include "gfx_pc.h"
+#include "pc/debug_context.h"
+#include "pc/profile_log.h"
 
 #define TEX_CACHE_STEP 512
 
@@ -941,16 +943,19 @@ static void gfx_opengl_select_texture(int tile, GLuint texture_id) {
         // the redundant glActiveTexture/glBindTexture pair matters on tile-based
         // mobile GPUs (Mali), where a rebind can flush pending FBO work early.
         opengl_curtex = tile;
+        PROFILE_ADD(texBindSkips, 1);
         return;
     }
     opengl_tex[tile] = tex;
     opengl_curtex = tile;
+    PROFILE_ADD(texBinds, 1);
     glActiveTexture(GL_TEXTURE0 + tile);
     glBindTexture(GL_TEXTURE_2D, tex->gltex);
     gfx_opengl_set_texture_uniforms(opengl_prg, tile);
 }
 
 static void gfx_opengl_upload_texture(const uint8_t *rgba32_buf, int width, int height) {
+    CTX_BEGIN_TIMED(CTX_TEXUPLOAD);
 #if defined(HANDHELD) && defined(USE_GLES)
     // The G31 is bandwidth-starved, and N64 texture data never carried more
     // than 5-6 bits of colour precision per channel to begin with (see the
@@ -971,12 +976,16 @@ static void gfx_opengl_upload_texture(const uint8_t *rgba32_buf, int width, int 
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, buf16);
         opengl_tex[opengl_curtex]->size[0] = width;
         opengl_tex[opengl_curtex]->size[1] = height;
+        PROFILE_ADD(texBytes, num_pixels * 2);
+        CTX_END_TIMED(CTX_TEXUPLOAD);
         return;
     }
 #endif
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba32_buf);
     opengl_tex[opengl_curtex]->size[0] = width;
     opengl_tex[opengl_curtex]->size[1] = height;
+    PROFILE_ADD(texBytes, (size_t)width * (size_t)height * 4);
+    CTX_END_TIMED(CTX_TEXUPLOAD);
 }
 
 static uint32_t gfx_cm_to_opengl(uint32_t val) {

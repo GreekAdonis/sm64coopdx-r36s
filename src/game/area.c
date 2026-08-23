@@ -30,6 +30,7 @@
 #include "pc/djui/djui_panel_pause.h"
 #include "pc/nametags.h"
 #include "engine/lighting_engine.h"
+#include "pc/debug_context.h"
 
 struct SpawnInfo gPlayerSpawnInfos[MAX_PLAYERS];
 struct Area gAreaData[MAX_AREAS];
@@ -449,7 +450,9 @@ void play_transition_after_delay(s16 transType, s16 time, u8 red, u8 green, u8 b
 void render_game(void) {
     dynos_update_gfx();
     if (gCurrentArea != NULL && !gWarpTransition.pauseRendering) {
+        CTX_BEGIN_TIMED(CTX_GEO);
         geo_process_root(gCurrentArea->root, gViewportOverride, gViewportClip, gFBSetColor);
+        CTX_END_TIMED(CTX_GEO);
 
 #ifdef HANDHELD
         // Everything from here on (HUD, nametags, text, cutscenes, menus, DJUI)

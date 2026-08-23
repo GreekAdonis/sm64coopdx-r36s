@@ -22,6 +22,13 @@ DEBUG ?= 0
 # Enable development/testing flags
 DEVELOPMENT ?= 0
 
+# Build with per-frame profiling instrumentation: a CSV of where each frame's
+# time went plus a sampling profiler of the game thread. Everything else about
+# the build is unchanged, so the numbers describe the shipping binary.
+# Unrelated to PROFILE below, which is gprof's -pg.
+# See docs/PROFILING-RK3326.md.
+FRAME_PROFILE ?= 0
+
 # Enable this if you want to use some very unsafe and potentially harmful code from the Lua standard libs
 # that is normally disabled to prevent catastrophic accidents.
 # Only enable this if you know exactly why you need it and will take measures to mitigate the risks.
@@ -1062,6 +1069,14 @@ endif
 ifeq ($(DEVELOPMENT),1)
   CC_CHECK_CFLAGS += -DDEVELOPMENT
   CFLAGS += -DDEVELOPMENT
+endif
+
+# Check for frame profiling option
+# (the sampler needs timer_create(), which lives in librt before glibc 2.34 --
+# -lrt is already linked unconditionally above, so nothing extra is needed)
+ifeq ($(FRAME_PROFILE),1)
+  CC_CHECK_CFLAGS += -DPROFILE_BUILD
+  CFLAGS += -DPROFILE_BUILD
 endif
 
 # Check for unsafe mode option

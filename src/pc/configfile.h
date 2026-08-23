@@ -140,7 +140,7 @@ extern bool         configLuaProfiler;
 extern bool         configDebugPrint;
 extern bool         configDebugInfo;
 extern bool         configDebugError;
-#ifdef DEVELOPMENT
+#if defined(DEVELOPMENT) || defined(PROFILE_BUILD)
 extern bool         configCtxProfiler;
 #endif
 // player settings

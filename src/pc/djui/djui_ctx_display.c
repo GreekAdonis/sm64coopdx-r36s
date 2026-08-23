@@ -4,7 +4,7 @@
 #include "pc/pc_main.h"
 #include "pc/debug_context.h"
 
-#ifdef DEVELOPMENT
+#ifdef CTX_TIMING_ENABLED
 
 static char* sDebugContextNames[] = {
     "NONE",
@@ -18,6 +18,12 @@ static char* sDebugContextNames[] = {
     "LEVEL",
     "HOOK",
     "LIGHTING",
+    "OBJ",
+    "GEO",
+    "GFXDL",
+    "TEXUP",
+    "SWAP",
+    "DELAY",
     "OTHER",
     "MAX",
 };
@@ -39,7 +45,7 @@ struct DjuiCtxDisplay {
 struct DjuiCtxDisplay *sCtxDisplay = NULL;
 
 void djui_ctx_display_update(void) {
-#ifdef DEVELOPMENT
+#ifdef CTX_TIMING_ENABLED
     if (!configCtxProfiler || sCtxDisplay == NULL) { return; }
 
     // Time we have for a indivdual frame. If we exceed it. We are in the red.
@@ -78,7 +84,7 @@ void djui_ctx_display_update(void) {
 }
 
 void djui_ctx_display_render(void) {
-#ifdef DEVELOPMENT
+#ifdef CTX_TIMING_ENABLED
     if (!configCtxProfiler || sCtxDisplay == NULL) { return; }
 
     djui_rect_render(&sCtxDisplay->base);

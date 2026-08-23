@@ -6,7 +6,7 @@
 
 static u32 sCtxDepth[CTX_MAX] = { 0 };
 
-#ifdef DEVELOPMENT
+#ifdef CTX_TIMING_ENABLED
 
 static f64 sCtxTime[CTX_MAX] = { 0 };
 
@@ -19,7 +19,7 @@ static u32 sCtxStackIndex = 0;
 void debug_context_begin(enum DebugContext ctx) {
     sCtxDepth[ctx]++;
 
-#ifdef DEVELOPMENT
+#ifdef CTX_TIMING_ENABLED
     if (sCtxStackIndex < MAX_TIME_STACK) {
         sCtxStartTimeStack[sCtxStackIndex] = clock_elapsed_f64();
     } else {
@@ -33,7 +33,7 @@ void debug_context_begin(enum DebugContext ctx) {
 void debug_context_end(enum DebugContext ctx) {
     sCtxDepth[ctx]--;
 
-#ifdef DEVELOPMENT
+#ifdef CTX_TIMING_ENABLED
     sCtxStackIndex--;
     if (sCtxStackIndex < MAX_TIME_STACK) {
         sCtxTime[ctx] += clock_elapsed_f64() - sCtxStartTimeStack[sCtxStackIndex];
@@ -47,7 +47,7 @@ void debug_context_reset(void) {
         if (sCtxDepth[i]) { LOG_ERROR("Context was not zero on reset: %u", i); }
         sCtxDepth[i] = 0;
 
-#ifdef DEVELOPMENT
+#ifdef CTX_TIMING_ENABLED
         sCtxTime[i] = 0;
 #endif
 
@@ -59,7 +59,7 @@ bool debug_context_within(enum DebugContext ctx) {
     return sCtxDepth[ctx] > 0;
 }
 
-#ifdef DEVELOPMENT
+#ifdef CTX_TIMING_ENABLED
 void debug_context_set_time(enum DebugContext ctx, f64 time) {
     if (ctx >= CTX_MAX) { return; }
     sCtxTime[ctx] = time;
