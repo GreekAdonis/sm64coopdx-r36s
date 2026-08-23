@@ -790,6 +790,59 @@ static void OPTIMIZE_O3 gfx_sp_vertex(size_t n_vertices, size_t dest_index, cons
     __m128 mat2 = _mm_load_ps(rsp.MP_matrix[2]);
     __m128 mat3 = _mm_load_ps(rsp.MP_matrix[3]);
 #endif
+// NOTE: deliberately no NEON path here. It looks like the obvious counterpart to
+// the SSE block above, but measured on the RK3326's Cortex-A35 every NEON
+// formulation of this transform is *slower* than the scalar fallback:
+//
+//   scalar                         37.50 ns/vertex   1.00x
+//   128-bit vmlaq + vgetq_lane     43.26 ns/vertex   0.87x
+//   128-bit vmlaq + vst1q          48.35 ns/vertex   0.78x
+//   2x 64-bit vmla                 59.25 ns/vertex   0.63x
+//
+// The A35 has a 64-bit NEON datapath, so a 128-bit vmlaq is two micro-ops, and
+// moving results back to scalar registers (which the rest of the loop needs) is
+// expensive on this core. GCC's scheduling of the scalar version already wins.
+
+    // Loop-invariant work hoisted out of the per-vertex loop below. None of this
+    // depends on the vertex index, but all of it used to be recomputed for every
+    // single vertex -- including a function call to le_get_mode().
+    const bool affectAllVertexColored =
+        (le_get_mode() == LE_MODE_AFFECT_ALL_SHADED_AND_COLORED && luaVertexColor);
+
+    float baseR = 0, baseG = 0, baseB = 0;
+
+    if (rsp.geometry_mode & G_LIGHTING) {
+        // Recomputing the light coefficients is already a once-per-call job --
+        // the flag self-clears -- but it was being tested once per vertex.
+        if (rsp.lights_changed) {
+            bool applyLightingDir = !(rsp.geometry_mode & G_TEXTURE_GEN);
+            for (int32_t i = 0; i < rsp.current_num_lights - 1; i++) {
+                calculate_normal_dir(&rsp.current_lights[i], rsp.current_lights_coeffs[i], applyLightingDir);
+            }
+            static const Light_t lookat_x = {{0, 0, 0}, 0, {0, 0, 0}, 0, {0, 127, 0}, 0};
+            static const Light_t lookat_y = {{0, 0, 0}, 0, {0, 0, 0}, 0, {127, 0, 0}, 0};
+            calculate_normal_dir(&lookat_x, rsp.current_lookat_coeffs[0], applyLightingDir);
+            calculate_normal_dir(&lookat_y, rsp.current_lookat_coeffs[1], applyLightingDir);
+            rsp.lights_changed = false;
+        }
+
+        bool useShade = rsp.current_num_lights > 1 &&
+            rsp.current_lights[rsp.current_num_lights - 2].col[0] == 0 &&
+            rsp.current_lights[rsp.current_num_lights - 2].col[1] == 0 &&
+            rsp.current_lights[rsp.current_num_lights - 2].col[2] == 0;
+
+        if (gFullbright) {
+            int32_t shadeIndex = rsp.current_num_lights > 1 ? rsp.current_num_lights - (useShade ? 1 : 2) : 0;
+            baseR = rsp.current_lights[shadeIndex].col[0];
+            baseG = rsp.current_lights[shadeIndex].col[1];
+            baseB = rsp.current_lights[shadeIndex].col[2];
+        } else {
+            int32_t lightIndex = rsp.current_num_lights > 0 ? rsp.current_num_lights - 1 : 0;
+            baseR = rsp.current_lights[lightIndex].col[0] * globalLightCached[1][0];
+            baseG = rsp.current_lights[lightIndex].col[1] * globalLightCached[1][1];
+            baseB = rsp.current_lights[lightIndex].col[2] * globalLightCached[1][2];
+        }
+    }
 
     for (size_t i = 0; i < n_vertices; i++, dest_index++) {
         const Vtx_t *v = &vertices[i].v;
@@ -818,40 +871,12 @@ static void OPTIMIZE_O3 gfx_sp_vertex(size_t n_vertices, size_t dest_index, cons
         short U = v->tc[0] * rsp.texture_scaling_factor.s >> 16;
         short V = v->tc[1] * rsp.texture_scaling_factor.t >> 16;
 
-        // are we on affect all shaded surfaces mode and on a vertex colorable surface
-        bool affectAllVertexColored = (le_get_mode() == LE_MODE_AFFECT_ALL_SHADED_AND_COLORED && luaVertexColor);
-
         if (rsp.geometry_mode & G_LIGHTING) {
-            if (rsp.lights_changed) {
-                bool applyLightingDir = !(rsp.geometry_mode & G_TEXTURE_GEN);
-                for (int32_t i = 0; i < rsp.current_num_lights - 1; i++) {
-                    calculate_normal_dir(&rsp.current_lights[i], rsp.current_lights_coeffs[i], applyLightingDir);
-                }
-                static const Light_t lookat_x = {{0, 0, 0}, 0, {0, 0, 0}, 0, {0, 127, 0}, 0};
-                static const Light_t lookat_y = {{0, 0, 0}, 0, {0, 0, 0}, 0, {127, 0, 0}, 0};
-                calculate_normal_dir(&lookat_x, rsp.current_lookat_coeffs[0], applyLightingDir);
-                calculate_normal_dir(&lookat_y, rsp.current_lookat_coeffs[1], applyLightingDir);
-                rsp.lights_changed = false;
-            }
-
-            bool useShade = rsp.current_num_lights > 1 &&
-                rsp.current_lights[rsp.current_num_lights - 2].col[0] == 0 &&
-                rsp.current_lights[rsp.current_num_lights - 2].col[1] == 0 &&
-                rsp.current_lights[rsp.current_num_lights - 2].col[2] == 0;
-            float r = 0;
-            float g = 0;
-            float b = 0;
-            if (gFullbright) {
-                int32_t shadeIndex = rsp.current_num_lights > 1 ? rsp.current_num_lights - (useShade ? 1 : 2) : 0;
-                r = rsp.current_lights[shadeIndex].col[0];
-                g = rsp.current_lights[shadeIndex].col[1];
-                b = rsp.current_lights[shadeIndex].col[2];
-            } else {
-                int32_t lightIndex = rsp.current_num_lights > 0 ? rsp.current_num_lights - 1 : 0;
-                r = rsp.current_lights[lightIndex].col[0] * globalLightCached[1][0];
-                g = rsp.current_lights[lightIndex].col[1] * globalLightCached[1][1];
-                b = rsp.current_lights[lightIndex].col[2] * globalLightCached[1][2];
-            }
+            // useShade and the base colour are loop-invariant; see the hoisted
+            // block above the loop.
+            float r = baseR;
+            float g = baseG;
+            float b = baseB;
 
             signed char nx = vn->n[0];
             signed char ny = vn->n[1];
