@@ -595,8 +595,13 @@ int main(int argc, char *argv[]) {
     // to a second core is the largest structural win available. The locking it
     // needs is already in place throughout src/audio/external.c.
     //
-    // Enable with audio_threaded=1 in sm64config.txt, and soak-test it in a
-    // mod-heavy lobby before trusting it.
+    // Enable with the line `audio_threaded true` in sm64config.txt -- the
+    // config parser compares against the literal string "true"
+    // (configfile.c), so "1", "TRUE" and "yes" all silently read as false.
+    // Edit it with the game closed: config is re-saved during startup and
+    // again on every settings change, so a value that failed to parse gets
+    // written back as false and the edit is lost. Soak-test in a mod-heavy
+    // lobby before trusting it.
     if (configAudioThreaded) {
         init_thread_handle(&gAudioThread, audio_thread, NULL, NULL, 0);
     }

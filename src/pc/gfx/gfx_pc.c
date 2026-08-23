@@ -1547,6 +1547,29 @@ static void gfx_dp_set_texture_image(UNUSED uint32_t format, uint32_t size, UNUS
     rdp.texture_to_load.siz = size;
 }
 
+// Marks the render tiles a tile-descriptor write invalidates. gfx_sp_tri1()
+// imports tiles 0 and 1 independently -- each reads only its own
+// rdp.texture_tile[i] and rdp.loaded_texture[i] -- so writing tile 0's
+// descriptor cannot change what tile 1 resolves to. Invalidating both, as this
+// used to, forces a re-import of tile 1 that resolves to the texture already
+// bound there: a gfx_flush(), i.e. an extra draw call, for nothing.
+//
+// It costs the most exactly where the device is slowest. Two-cycle shaders are
+// what make tile 1 get imported at all, so water-heavy levels pay it on every
+// single tile-0 change: Secret Aquarium measured 3.77 redundant binds per real
+// bind and 473 draws a frame, against 0.08 and 97 in Castle Grounds.
+//
+// Load tiles (anything but 0 and 1) still invalidate both, since which render
+// tile they feed depends on rdp.texture_tile[].index resolved later.
+static void gfx_mark_tile_changed(uint8_t tile) {
+    if (sOnlyTextureChangeOnAddrChange) { return; }
+    if (tile < MAX_TEXTURES) {
+        rdp.textures_changed[tile] = true;
+    } else {
+        for (size_t i = 0; i < MAX_TEXTURES; i++) { rdp.textures_changed[i] = true; }
+    }
+}
+
 static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t tmem, uint8_t tile, uint32_t palette, uint32_t cmt, uint32_t maskt, uint32_t shiftt, uint32_t cms, uint32_t masks, uint32_t shifts) {
     // Same reasoning as gfx_update_loaded_texture(): if every field this writes
     // already holds the value being written, the tile is unchanged and nothing
@@ -1577,10 +1600,7 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
     rdp.texture_tile[tile].palette = palette;
     // For some reason toad player's face breaks without this line, everything else is fine though
     rdp.texture_tile[tile].index = (tile == G_TX_LOADTILE ? tmem/256 : (tile == G_TX_LOADTILE_6_UNKNOWN ? 1 : 0));
-    if (!sOnlyTextureChangeOnAddrChange && !unchanged) {
-        rdp.textures_changed[0] = true;
-        rdp.textures_changed[1] = true;
-    }
+    if (!unchanged) { gfx_mark_tile_changed(tile); }
 }
 
 static void gfx_dp_set_tile_size(uint8_t tile, uint16_t uls, uint16_t ult, uint16_t lrs, uint16_t lrt) {
@@ -1592,10 +1612,7 @@ static void gfx_dp_set_tile_size(uint8_t tile, uint16_t uls, uint16_t ult, uint1
     rdp.texture_tile[tile].ult = ult;
     rdp.texture_tile[tile].lrs = lrs;
     rdp.texture_tile[tile].lrt = lrt;
-    if (!sOnlyTextureChangeOnAddrChange && !unchanged) {
-        rdp.textures_changed[0] = true;
-        rdp.textures_changed[1] = true;
-    }
+    if (!unchanged) { gfx_mark_tile_changed(tile); }
 }
 
 static void gfx_dp_load_tlut(uint8_t tile, uint32_t high_index) {
@@ -2172,6 +2189,9 @@ void gfx_start_frame(void) {
         gGfxPcResetTex1--;
         rdp.loaded_texture[1].addr = NULL;
         rdp.loaded_texture[1].size_bytes = 0;
+        // A tile-0 write used to invalidate tile 1 as a side effect and cover
+        // this; gfx_mark_tile_changed() no longer does, so say it explicitly.
+        rdp.textures_changed[1] = true;
     }
     gfx_wapi->handle_events();
     gfx_wapi->get_dimensions(&gfx_current_dimensions.width, &gfx_current_dimensions.height);
