@@ -42,6 +42,11 @@ TIMINGS = [
 COUNTERS = ["subframes", "draws", "tris", "verts", "texloads", "texbytes",
             "texflushes", "binds", "bindskips", "shaders", "objects", "players"]
 
+# Why each batch split happened. Absent from older logs; the printer skips
+# whatever a given CSV does not carry.
+FLUSH_CAUSES = ["fltexture", "flshader", "flalpha", "fldepth", "flsampler",
+                "flviewport", "flfull", "flcomb"]
+
 
 def pct(values, p):
     if not values:
@@ -115,6 +120,19 @@ def report_frames(meta, rows, top_n):
             continue
         vals = [r[key] for r in rows]
         print(f"  {key:12} mean {mean(vals):10.1f}   p50 {pct(vals,50):8}   max {max(vals):8}")
+
+    present = [k for k in FLUSH_CAUSES if k in rows[0]]
+    if present:
+        # A draw call costs the same whatever forced it, so the biggest row here
+        # is the one worth attacking -- and a cause that barely registers is not
+        # worth optimising however slow it looks in the source.
+        totals = {k: sum(r[k] for r in rows) for k in present}
+        grand = sum(totals.values()) or 1
+        print("\nwhat split the batches (draw calls per frame, by cause):")
+        for key in sorted(present, key=lambda k: -totals[k]):
+            vals = [r[key] for r in rows]
+            print(f"  {key:12} mean {mean(vals):8.1f}   p50 {pct(vals,50):6}   "
+                  f"max {max(vals):6}   {100.0*totals[key]/grand:5.1f}% of splits")
 
     print(f"\nworst {top_n} frames by work:")
     worst = sorted(rows, key=busy, reverse=True)[:top_n]

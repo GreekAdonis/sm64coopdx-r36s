@@ -122,6 +122,13 @@ How to read the result:
   with the `objects` counter.
 - **`lua hooks` dominates** — a mod. The in-game Lua profiler
   (`lua_profiler true`) attributes it per mod.
+- **`display list -> GL` is large but `tris` is small** — batch fragmentation,
+  not geometry. Read the "what split the batches" table: it attributes every
+  draw call to the state change that forced it (`fltexture`, `flshader`,
+  `flalpha`, `fldepth`, `flsampler`, `flviewport`, `flfull`, `flcomb`). A draw
+  call costs the same whatever caused it, so the largest row is the one worth
+  attacking, and a cause near zero is not worth touching however slow it looks
+  in the source. `flfull` is the healthy one — it means a batch filled up.
 - **`texflushes` is ever non-zero** — the texture cache is thrashing, which
   makes `texloads`/`texbytes` explode. That is a fixable configuration
   problem, not a hardware limit.

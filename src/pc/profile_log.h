@@ -22,6 +22,19 @@ struct ProfileCounters {
     u32 texBindSkips;    // binds skipped by the bind cache
     u32 shaderLoads;     // shader program switches
     u32 subFrames;       // rendered frames produced for this game frame
+
+    // Which state change forced each batch split, counted only when the vertex
+    // buffer actually had geometry to emit. These sum to drawCalls (minus the
+    // end-of-frame and HUD-pass flushes) and say where a frame's draw calls
+    // come from, which "draws" alone cannot.
+    u32 flushDepth;      // depth test, depth mask or decal mode
+    u32 flushViewport;   // viewport or scissor rect
+    u32 flushShader;     // shader program switch
+    u32 flushAlpha;      // alpha blending toggled
+    u32 flushTexture;    // a tile was re-imported
+    u32 flushSampler;    // filter/clamp/mirror parameters
+    u32 flushBufferFull; // hit MAX_BUFFERED triangles
+    u32 flushCombiner;   // a new colour combiner had to be built
 };
 
 extern struct ProfileCounters gProfileCounters;

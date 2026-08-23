@@ -208,6 +208,16 @@ void ext_gfx_run_dl(Gfx* cmd);
     return 0;
 }*/
 
+// Attributes a batch split to whatever state change forced it, but only when
+// the buffer actually had geometry in it -- a flush on an empty buffer costs
+// nothing and would otherwise inflate whichever cause happened to run first.
+// PROFILE_ADD compiles to nothing outside a profile build, so this collapses
+// back to a bare gfx_flush() there.
+#define FLUSH_FOR(_field) do { \
+    if (buf_vbo_len > 0) { PROFILE_ADD(_field, 1); } \
+    gfx_flush(); \
+} while (0)
+
 static void gfx_flush(void) {
     if (buf_vbo_len > 0) {
         PROFILE_ADD(drawCalls, 1);
@@ -336,7 +346,7 @@ static struct ColorCombiner *gfx_lookup_or_create_color_combiner(struct CombineM
         }
     }
 
-    gfx_flush();
+    FLUSH_FOR(flushCombiner);
 
     struct ColorCombiner *comb = &color_combiner_pool[color_combiner_pool_index];
     color_combiner_pool_index = (color_combiner_pool_index + 1) % CC_MAX_SHADERS;
@@ -1166,21 +1176,21 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
 
     bool depth_test = (rsp.geometry_mode & G_ZBUFFER) == G_ZBUFFER;
     if (depth_test != rendering_state.depth_test) {
-        gfx_flush();
+        FLUSH_FOR(flushDepth);
         gfx_rapi->set_depth_test(depth_test);
         rendering_state.depth_test = depth_test;
     }
 
     bool z_upd = (rdp.other_mode_l & Z_UPD) == Z_UPD;
     if (z_upd != rendering_state.depth_mask) {
-        gfx_flush();
+        FLUSH_FOR(flushDepth);
         gfx_rapi->set_depth_mask(z_upd);
         rendering_state.depth_mask = z_upd;
     }
 
     bool zmode_decal = (rdp.other_mode_l & ZMODE_DEC) == ZMODE_DEC;
     if (zmode_decal != rendering_state.decal_mode) {
-        gfx_flush();
+        FLUSH_FOR(flushDepth);
         gfx_rapi->set_zmode_decal(zmode_decal);
         rendering_state.decal_mode = zmode_decal;
     }
@@ -1189,13 +1199,13 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
         static uint32_t x_adjust_4by3_prev;
         if (memcmp(&rdp.viewport, &rendering_state.viewport, sizeof(rdp.viewport)) != 0
             || x_adjust_4by3_prev != gfx_current_dimensions.x_adjust_4by3) {
-            gfx_flush();
+            FLUSH_FOR(flushViewport);
             gfx_rapi->set_viewport(rdp.viewport.x + gfx_current_dimensions.x_adjust_4by3, rdp.viewport.y, rdp.viewport.width, rdp.viewport.height);
             rendering_state.viewport = rdp.viewport;
         }
         if (memcmp(&rdp.scissor, &rendering_state.scissor, sizeof(rdp.scissor)) != 0
             || x_adjust_4by3_prev != gfx_current_dimensions.x_adjust_4by3) {
-            gfx_flush();
+            FLUSH_FOR(flushViewport);
             gfx_rapi->set_scissor(rdp.scissor.x + gfx_current_dimensions.x_adjust_4by3, rdp.scissor.y, rdp.scissor.width, rdp.scissor.height);
             rendering_state.scissor = rdp.scissor;
         }
@@ -1242,13 +1252,13 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
     struct ShaderProgram *prg = comb->prg;
     if (prg != rendering_state.shader_program) {
         PROFILE_ADD(shaderLoads, 1);
-        gfx_flush();
+        FLUSH_FOR(flushShader);
         gfx_rapi->unload_shader(rendering_state.shader_program);
         gfx_rapi->load_shader(prg);
         rendering_state.shader_program = prg;
     }
     if (cm->use_alpha != rendering_state.alpha_blend) {
-        gfx_flush();
+        FLUSH_FOR(flushAlpha);
         gfx_rapi->set_use_alpha(cm->use_alpha);
         rendering_state.alpha_blend = cm->use_alpha;
     }
@@ -1259,7 +1269,7 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
     for (int32_t i = 0; i < 2; i++) {
         if (used_textures[i]) {
             if (rdp.textures_changed[i]) {
-                gfx_flush();
+                FLUSH_FOR(flushTexture);
                 import_texture(i);
                 rdp.textures_changed[i] = false;
             }
@@ -1267,7 +1277,7 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
             struct TextureHashmapNode* tex = rendering_state.textures[i];
             if (tex) {
                 if (linear_filter != tex->linear_filter || rdp.texture_tile[i].cms != tex->cms || rdp.texture_tile[i].cmt != rendering_state.textures[i]->cmt) {
-                    gfx_flush();
+                    FLUSH_FOR(flushSampler);
                     gfx_rapi->set_sampler_parameters(i, linear_filter, rdp.texture_tile[i].cms, rdp.texture_tile[i].cmt);
                     tex->linear_filter = linear_filter;
                     tex->cms = rdp.texture_tile[i].cms;
@@ -1404,7 +1414,7 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
         buf_vbo[buf_vbo_len++] = color->a / 255.0f;*/
     }
     if (++buf_vbo_num_tris == MAX_BUFFERED) {
-        gfx_flush();
+        FLUSH_FOR(flushBufferFull);
     }
 }
 
