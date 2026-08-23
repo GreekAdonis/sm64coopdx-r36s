@@ -132,6 +132,10 @@ f32 gFogIntensity = 1.0f;
 bool gFullbright = false;
 
 int gShaderFlags[SHADER_FLAG_MAX] = { 0 };
+// Cached "is any entry of gShaderFlags non-zero". Read once per triangle in
+// gfx_sp_tri(), so it is kept up to date by the few places that write
+// gShaderFlags (see smlua_gfx_utils.c) rather than rescanned there.
+bool gShaderFlagsAny = false;
 f32 gDefaultShaderFlagValues[SHADER_FLAG_MAX] = {
     [SHADER_FLAG_HUE] = 0.0f,
     [SHADER_FLAG_SATURATION] = 1.0f,
@@ -1180,7 +1184,19 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
     cm->use_2cycle     = (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE;
     cm->use_fog        = (rdp.other_mode_l >> 30)                       == G_BL_CLR_FOG;
     cm->light_map      = (rsp.geometry_mode & G_LIGHT_MAP_EXT)          == G_LIGHT_MAP_EXT;
-    cm->world_geometry = gShaderFlagsEnabled && (v1->world_geometry && v2->world_geometry && v3->world_geometry);
+    // gShaderFlagsAny gates this as well as gShaderFlagsEnabled. world_geometry
+    // exists purely to switch on the post-processing block in the fragment
+    // shader (hue/saturation/brightness/contrast/exposure/dither/posterize/
+    // scanlines) -- it means nothing to any other backend. With every flag off,
+    // which is the default and the overwhelmingly common case, that block was
+    // still being compiled in and every fragment paid eight uniform loads,
+    // compares and branches to skip all of it. Folding "is any flag actually on"
+    // into the combine mode means the common case now selects a shader variant
+    // that has none of that code in it. The flag is already part of cm->flags
+    // and therefore of the combiner hash, so variants swap correctly when a mod
+    // turns an effect on or off.
+    cm->world_geometry = gShaderFlagsEnabled && gShaderFlagsAny &&
+                         (v1->world_geometry && v2->world_geometry && v3->world_geometry);
 
     if (cm->texture_edge) {
         cm->use_alpha = true;

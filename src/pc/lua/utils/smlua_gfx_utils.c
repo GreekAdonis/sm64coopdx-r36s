@@ -9,9 +9,20 @@ bool get_shader_flag_enabled(enum ShaderFlag flag) {
     return gShaderFlags[flag];
 }
 
+// Keeps gShaderFlagsAny in step with gShaderFlags. Called only when a flag
+// actually changes, so the scan cost is irrelevant; gfx_sp_tri() reads the
+// cached result once per triangle instead of scanning all eight every time.
+static void refresh_shader_flags_any(void) {
+    gShaderFlagsAny = false;
+    for (s32 i = 0; i < SHADER_FLAG_MAX; i++) {
+        if (gShaderFlags[i]) { gShaderFlagsAny = true; return; }
+    }
+}
+
 void set_shader_flag_enabled(enum ShaderFlag flag, bool enabled) {
     if (flag < 0 || flag >= SHADER_FLAG_MAX) { return; }
     gShaderFlags[flag] = enabled ? 1 : 0;
+    refresh_shader_flags_any();
 }
 
 f32 get_shader_flag_value(enum ShaderFlag flag) {
@@ -36,6 +47,7 @@ AT_STARTUP void clear_all_shader_flags(void) {
     gShaderFlagsEnabled = true;
     memset(gShaderFlags, 0, sizeof(s32) * SHADER_FLAG_MAX);
     memcpy(gShaderFlagValues, gDefaultShaderFlagValues, sizeof(f32) * SHADER_FLAG_MAX);
+    gShaderFlagsAny = false;
 }
 
 ///
