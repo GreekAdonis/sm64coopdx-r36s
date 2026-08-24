@@ -71,18 +71,27 @@ static const char* sLuaHookedEventTypeName[] = {
 // Timing is inclusive, matching the CTX timers -- a hook that triggers another
 // hook is charged for the inner one as well. The two extra clock reads per call
 // only exist in a profile build, which already pays the same pair for CTX_HOOK.
+// Two buckets past the real hook types: per-object behaviour callbacks, which
+// reach smlua_call_hook() by their own path rather than through the macro, and
+// anything else that turns up untagged.
+#define PROFILE_HOOK_BEHAVIOR (HOOK_MAX + 1)
+#define PROFILE_HOOK_SLOTS    (HOOK_MAX + 2)
+
 u16 gProfileCurHookType = HOOK_MAX;
-static u32 sHookTypeCalls[HOOK_MAX + 1] = { 0 };
-static f64 sHookTypeUs[HOOK_MAX + 1] = { 0 };
+static u32 sHookTypeCalls[PROFILE_HOOK_SLOTS] = { 0 };
+static f64 sHookTypeUs[PROFILE_HOOK_SLOTS] = { 0 };
 
 void profile_dump_hook_types(const char* path) {
     FILE* f = fopen(path, "w");
     if (!f) { return; }
 
     fprintf(f, "hook,calls,us\n");
-    for (u32 i = 0; i <= (u32)HOOK_MAX; i++) {
+    for (u32 i = 0; i < (u32)PROFILE_HOOK_SLOTS; i++) {
         if (sHookTypeCalls[i] == 0) { continue; }
-        const char* name = (i < (u32)HOOK_MAX) ? sLuaHookedEventTypeName[i] : "(behavior/manual)";
+        const char* name;
+        if (i == (u32)PROFILE_HOOK_BEHAVIOR) { name = "(behaviour callback)"; }
+        else if (i == (u32)HOOK_MAX)         { name = "(untagged)"; }
+        else                                 { name = sLuaHookedEventTypeName[i]; }
         fprintf(f, "%s,%u,%.0f\n", name ? name : "(unknown)", sHookTypeCalls[i], sHookTypeUs[i]);
     }
 
@@ -105,8 +114,15 @@ int smlua_call_hook(lua_State* L, int nargs, int nresults, int errfunc, struct M
     lua_profiler_start_counter(activeMod);
 
 #ifdef PROFILE_BUILD
-    // Claim the pending hook type and clear it, so a hook fired from inside
-    // this one's body does not inherit our label.
+    // Borrow the pending hook type and clear it for the duration of the call,
+    // so a hook fired from inside this one's body is not mislabelled as ours.
+    //
+    // It has to be put back afterwards, not left cleared: a dispatcher loops
+    // over every mod that hooked the event and calls in here once per mod, and
+    // the macro only tags the call site once. Clearing it permanently attributed
+    // the first mod's callback to the hook and every other mod's to the
+    // catch-all, which in run 8 buried 78% of all hook time in
+    // "(behavior/manual)".
     u16 profHookType = gProfileCurHookType;
     gProfileCurHookType = HOOK_MAX;
     f64 profStart = clock_elapsed_f64();
@@ -120,6 +136,7 @@ int smlua_call_hook(lua_State* L, int nargs, int nresults, int errfunc, struct M
 #ifdef PROFILE_BUILD
     sHookTypeCalls[profHookType]++;
     sHookTypeUs[profHookType] += (clock_elapsed_f64() - profStart) * 1000000.0;
+    gProfileCurHookType = profHookType;
 #endif
 
     lua_profiler_stop_counter(activeMod);
@@ -1200,6 +1217,9 @@ void smlua_call_behavior_hook(struct Object* object) {
         bool init = object->curBhvCommand == object->initBhvCommand;
 
         // Run callbacks one after the other
+#ifdef PROFILE_BUILD
+        gProfileCurHookType = PROFILE_HOOK_BEHAVIOR;
+#endif
         struct GrowingArray *callbacks = init ? hooked->initCallbacks : hooked->loopCallbacks;
         growing_array_for_each_(callbacks, struct LuaHookedBehaviorCallback, callback) {
 
