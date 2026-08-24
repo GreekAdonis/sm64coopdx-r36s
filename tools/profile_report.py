@@ -44,7 +44,7 @@ TIMINGS = [
 COUNTERS = ["subframes", "draws", "tris", "verts", "texloads", "texbytes",
             "texflushes", "binds", "bindskips", "impskips", "shaders", "objects",
             "players", "hookcalls", "hookbhv", "fieldgets", "fieldsets",
-            "objsdrawn", "dlnodes", "dldistinct"]
+            "objsdrawn", "dlnodes", "dldistinct", "renderskips"]
 
 # Why each batch split happened. Absent from older logs; the printer skips
 # whatever a given CSV does not carry.
@@ -178,6 +178,11 @@ def report_frames(meta, rows, top_n):
             print(f"   ({culled:.0f}% culled before the renderer sees them)")
         else:
             print()
+        skips = sum(r.get("renderskips", 0) for r in rows)
+        if skips:
+            nsk = sum(1 for r in rows if r.get("renderskips", 0))
+            print(f"  renders dropped   {skips/n:10.2f}   (on {100.0*nsk/n:.1f}% of frames,"
+                  f" to hold the simulation at wall-clock 30Hz)")
         print(f"  display lists     {nodes/n:10.1f}")
         print(f"  distinct of those {distinct/n:10.1f}", end="")
         if nodes:

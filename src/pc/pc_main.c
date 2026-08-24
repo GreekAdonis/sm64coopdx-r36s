@@ -257,8 +257,87 @@ static void select_graphics_backend(void) {
     }
 }
 
+// Adaptive render dropping.
+//
+// gNetworkAreaTimer is driven by wall clock at 30Hz (see clock_elapsed_ticks()),
+// and cur_obj_update() re-runs an object's behaviour until its own areaTimer
+// catches up to it. That means the simulation's workload per second is fixed by
+// the clock, not by our framerate: at 20fps every area-timer object simply runs
+// its behaviour one and a half times per frame instead of once. So a slow client
+// cannot "do less simulation" -- there is no less to do, and skimping on it is
+// what desyncs the room, because the client keeps broadcasting sync-object state
+// from a simulation running at the wrong rate.
+//
+// Rendering is the part that can give. Measured in a nine-player room on the
+// RK3326: 38.9ms of work against a 33.3ms budget, of which the display-list
+// build, the interpolation pass and the swap were 13.8ms. Dropping those on the
+// frames where we are behind buys back more than twice the overrun, so the
+// simulation converges back to 30Hz instead of falling further behind.
+//
+// Two guards keep the failure mode sane. Consecutive skips are capped so the
+// player always gets a picture, however choppy, rather than a frozen window; and
+// a deadline that has receded more than a second is abandoned rather than
+// chased, so a client that is hopelessly slow does not end up skipping every
+// render forever paying down a backlog it can never clear. A client that still
+// cannot keep up past those is beyond what this can fix -- the missing backstop
+// there is relinquishing sync-object ownership so it stops speaking for objects
+// it is simulating badly.
+
+// Always draw at least every third iteration. Two is not an arbitrary choice:
+// with the measured cost of a rendered iteration against a skipped one, two
+// skips per render is what lands the simulation back on 30Hz. One is not enough
+// (it settles around 26Hz) and three buys nothing but a worse picture.
+#define RENDER_SKIP_MAX_CONSECUTIVE 2
+
+// Past this the backlog is not payable -- a level load, a mod download, or
+// hardware that simply cannot run this room. Give up on it rather than skipping
+// every render forever chasing a deadline that keeps receding.
+#define RENDER_SKIP_GIVE_UP_SECONDS 1.0
+
+static f64 sSimDeadline   = 0.0;
+static u32 sRenderSkipRun = 0;
+
+static bool should_skip_render(void) {
+    // Single player has no shared clock to stay in step with, and
+    // network_check_singleplayer_pause() stops the area timer there anyway.
+    if (gNetworkType == NT_NONE) {
+        sSimDeadline = 0.0;
+        sRenderSkipRun = 0;
+        return false;
+    }
+
+    f64 now = clock_elapsed_f64();
+    if (sSimDeadline == 0.0) { sSimDeadline = now; }
+
+    // One iteration is one simulation tick, so the deadline advances by exactly
+    // one tick whether or not we met it. Wall clock running past it is the
+    // amount we are behind, and it accumulates fractional overruns that counting
+    // whole gNetworkAreaTimer ticks would round away.
+    sSimDeadline += sFrameTime;
+    f64 behind = now - sSimDeadline;
+
+    if (behind > RENDER_SKIP_GIVE_UP_SECONDS || behind < -RENDER_SKIP_GIVE_UP_SECONDS) {
+        sSimDeadline = now;
+        sRenderSkipRun = 0;
+        return false;
+    }
+
+    if (behind <= 0.0 || sRenderSkipRun >= RENDER_SKIP_MAX_CONSECUTIVE) {
+        sRenderSkipRun = 0;
+        return false;
+    }
+
+    sRenderSkipRun++;
+    return true;
+}
+
 void produce_interpolation_frames_and_delay(void) {
     u32 refreshRate = get_target_refresh_rate();
+
+    // Evaluated once per game iteration rather than per sub-frame: it advances
+    // the debt accounting, and a sub-frame loop is by definition something we
+    // only enter when we are comfortably ahead.
+    const bool skipRender = should_skip_render();
 
     gRenderingInterpolated = true;
 
@@ -292,6 +371,16 @@ void produce_interpolation_frames_and_delay(void) {
         gRenderingDelta = delta;
 
         gfx_start_frame();
+
+        // Deliberately after gfx_start_frame(): that is where window and input
+        // events are pumped, and a client that stops reading them looks hung and
+        // cannot even be closed. Everything below it -- interpolation, the
+        // display-list run and the swap -- is what we are here to skip.
+        if (skipRender) {
+            PROFILE_ADD(renderSkips, 1);
+            break;
+        }
+
         if (!gSkipInterpolationTitleScreen) {
             CTX_BEGIN_TIMED(CTX_INTERP);
             patch_interpolations(delta);

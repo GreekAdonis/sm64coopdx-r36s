@@ -103,7 +103,7 @@ void profile_log_init(void) {
             "draws,tris,verts,texloads,texbytes,texflushes,binds,bindskips,impskips,shaders,"
             "fldepth,flviewport,flshader,flalpha,fltexture,flsampler,flfull,flcomb,"
             "hookcalls,hookbhv,fieldgets,fieldsets,"
-            "objsdrawn,dlnodes,dldistinct,"
+            "objsdrawn,dlnodes,dldistinct,renderskips,"
             "mario_x,mario_y,mario_z\n");
 
     sStartTime = clock_elapsed_f64();
@@ -138,7 +138,7 @@ void profile_log_frame(void) {
             "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
             "%u,%u,%u,%u,%u,%u,%u,%u,"
             "%u,%u,%u,%u,"
-            "%u,%u,%u,"
+            "%u,%u,%u,%u,"
             "%d,%d,%d\n",
             (unsigned long long)sFrame,
             clock_elapsed_f64() - sStartTime,
@@ -167,7 +167,7 @@ void profile_log_frame(void) {
             c->flushDepth, c->flushViewport, c->flushShader, c->flushAlpha,
             c->flushTexture, c->flushSampler, c->flushBufferFull, c->flushCombiner,
             c->hookCalls, c->hookBehavior, c->luaFieldGets, c->luaFieldSets,
-            c->objsDrawn, c->dlNodes, c->dlDistinct,
+            c->objsDrawn, c->dlNodes, c->dlDistinct, c->renderSkips,
             (int)m->pos[0], (int)m->pos[1], (int)m->pos[2]);
 
     sFrame++;

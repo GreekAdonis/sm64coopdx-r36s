@@ -64,6 +64,12 @@ struct ProfileCounters {
     u32 objsDrawn;       // objects that passed obj_is_in_view() and were rendered
     u32 dlNodes;         // display lists appended to the master lists
     u32 dlDistinct;      // distinct display list pointers among them
+
+    // Renders dropped to keep the simulation at the wall-clock 30Hz the netcode's
+    // area timer runs on. Non-zero means the client was behind and traded picture
+    // for staying in sync; sustained non-zero means it is not winning that trade
+    // and needs to stop being authoritative rather than just drawing less.
+    u32 renderSkips;
 };
 
 extern struct ProfileCounters gProfileCounters;
