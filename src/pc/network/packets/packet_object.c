@@ -487,6 +487,11 @@ void network_update_objects(void) {
     }
 #endif
 
+    // One clock read for the whole sweep rather than one per sync object. This
+    // only feeds a per-object rate limiter, so a timestamp taken at the top of
+    // the loop is as good as one taken partway through it.
+    f32 now = clock_elapsed();
+
     for (struct SyncObject* so = sync_object_get_first(); so != NULL; so = sync_object_get_next()) {
         if (!so || !so->o) { continue; }
 
@@ -526,7 +531,7 @@ void network_update_objects(void) {
         if (updateRate < so->minUpdateRate) { updateRate = so->minUpdateRate; }
 
         // see if we should update
-        float timeSinceUpdate = (clock_elapsed() - so->clockSinceUpdate);
+        float timeSinceUpdate = (now - so->clockSinceUpdate);
         if (timeSinceUpdate < updateRate) { continue; }
 
         // update!
