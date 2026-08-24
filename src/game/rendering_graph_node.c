@@ -368,6 +368,22 @@ void patch_mtx_interpolated(f32 delta) {
     }
     gCurGraphNodeObject = savedObj;
 
+    // A delta of 1.0 means "show the current game state": lerp(prev, cur, 1.0)
+    // is cur, in whatever space it is expressed. That is not a rare corner --
+    // it is what every frame that overran its budget looks like, because
+    // produce_interpolation_frames_and_delay() then draws exactly one sub-frame
+    // and clamps delta to 1.0. On a crowded scene that is most frames, and this
+    // loop runs once per display list node, so it is worth not doing the work
+    // twice over.
+    //
+    // The saving is real rather than cosmetic: delta_interpolate_mtx()'s
+    // accurate path decomposes both matrices, slerps a quaternion and
+    // recomposes, only to arrive back at its second argument. Its bit-identical
+    // memcmp shortcut does not rescue us here either -- a moving camera rewrites
+    // every camera-space matrix each frame, including those of objects that
+    // never moved.
+    const bool noInterp = (delta >= 1.0f);
+
     // calculate outside of for loop to reduce overhead
     // technically this is improper use of mtxf functions, but coop doesn't target N64
     Mtx camTranfInv, prevCamTranfInv;
@@ -376,7 +392,13 @@ void patch_mtx_interpolated(f32 delta) {
     if (translateCamSpace) {
         // compute inverse camera matrix to transform out of camera space later
         mtxf_inverse(camTranfInv.m, *sCameraNode->matrixPtr);
-        mtxf_inverse(prevCamTranfInv.m, *sCameraNode->matrixPtrPrev);
+
+        // The previous frame's inverse exists only to carry the previous matrix
+        // into world space for the lerp below. With no lerp to do, nothing reads
+        // it.
+        if (!noInterp) {
+            mtxf_inverse(prevCamTranfInv.m, *sCameraNode->matrixPtrPrev);
+        }
 
         // use camera node's stored information to calculate interpolated camera transform
         Vec3f posInterp, focusInterp;
@@ -392,17 +414,42 @@ void patch_mtx_interpolated(f32 delta) {
         Mtx *srcMtx = interp->mtx;
         Mtx *srcMtxPrev = interp->mtxPrev;
 
+        // Scratch for the camera-space round trip. Declared out here because
+        // srcMtx/srcMtxPrev are read after the block that fills them, and a
+        // buffer scoped to that block would be dead by then.
+        Mtx bufMtx, bufMtxPrev;
+
+        if (noInterp && !interp->usingCamSpace) {
+            // interp->interp would end up a byte-for-byte copy of *srcMtx, and
+            // nothing else reads it. Point the display list straight at the
+            // matrix we already have.
+            gSPMatrix(pos++, VIRTUAL_TO_PHYSICAL(srcMtx),
+                      G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
+            continue;
+        }
+
         if (interp->usingCamSpace && translateCamSpace) {
             // transform out of camera space so the matrix can interp in world space
-            Mtx bufMtx, bufMtxPrev;
             mtxf_copy(bufMtx.m, srcMtx->m);
-            mtxf_copy(bufMtxPrev.m, srcMtxPrev->m);
             mtxf_mul(bufMtx.m, bufMtx.m, camTranfInv.m);
-            mtxf_mul(bufMtxPrev.m, bufMtxPrev.m, prevCamTranfInv.m);
             srcMtx = &bufMtx;
-            srcMtxPrev = &bufMtxPrev;
+
+            if (!noInterp) {
+                mtxf_copy(bufMtxPrev.m, srcMtxPrev->m);
+                mtxf_mul(bufMtxPrev.m, bufMtxPrev.m, prevCamTranfInv.m);
+                srcMtxPrev = &bufMtxPrev;
+            }
         }
-        delta_interpolate_mtx(&interp->interp, srcMtxPrev, srcMtx, delta);
+        if (noInterp) {
+            // Exactly what delta_interpolate_mtx() would store, without the
+            // decompose/slerp/recompose round trip to get there. The camera-space
+            // conversion above and the one below are deliberately kept: they are
+            // not a no-op pair unless the camera node sits on an identity parent
+            // matrix, and that is not worth assuming here.
+            interp->interp = *srcMtx;
+        } else {
+            delta_interpolate_mtx(&interp->interp, srcMtxPrev, srcMtx, delta);
+        }
         if (interp->usingCamSpace) {
             // transform back to camera space, respecting camera interpolation
             mtxf_mul(interp->interp.m, interp->interp.m, camInterp.m);
