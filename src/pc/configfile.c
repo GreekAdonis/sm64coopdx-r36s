@@ -124,7 +124,6 @@ unsigned int configSoundOutput                    = 0; // 0 = Stereo, 1 = Mono, 
 // threading until it seems stable") and that concern was never resolved, so it
 // stays opt-in and off by default. Only enable it if you can soak-test it.
 bool         configAudioThreaded                  = false;
-bool         configNetworkThreaded                = false;
 // control binds
 static const unsigned int defaultConfigKeyA[MAX_BINDS]          = { 0x0026,     0x1000,     0x1103     };
 static const unsigned int defaultConfigKeyB[MAX_BINDS]          = { 0x0033,     0x1001,     0x1101     };
@@ -313,7 +312,6 @@ static const struct ConfigOption options[] = {
     {.name = "fade_distant_sounds",            .type = CONFIG_TYPE_BOOL, .boolValue = &configFadeoutDistantSounds},
     {.name = "mute_focus_loss",                .type = CONFIG_TYPE_BOOL, .boolValue = &configMuteFocusLoss},
     {.name = "audio_threaded",                 .type = CONFIG_TYPE_BOOL, .boolValue = &configAudioThreaded},
-    {.name = "network_threaded",               .type = CONFIG_TYPE_BOOL, .boolValue = &configNetworkThreaded},
     {.name = "sound_output",                   .type = CONFIG_TYPE_UINT, .uintValue = &configSoundOutput},
     // control binds
     {.name = "key_a",                          .type = CONFIG_TYPE_BIND, .uintValue = configKeyA},

@@ -154,7 +154,6 @@ extern u8 gAllowOrderedPacketClear;
 
 // packet.c
 void packet_compress(struct Packet* p, u8** compBuffer, u32* compSize);
-void packet_compress_into(struct Packet* p, u8* dst, u32 dstLen, u8** compBuffer, u32* compSize);
 bool packet_decompress(struct Packet* p, u8* compBuffer, u32 compSize);
 void packet_process(struct Packet* p);
 void packet_receive(struct Packet* packet);

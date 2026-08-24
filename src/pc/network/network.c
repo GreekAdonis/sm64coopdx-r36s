@@ -7,7 +7,6 @@
 #include "object_constants.h"
 #include "behavior_table.h"
 #include "pc/configfile.h"
-#include "network_send_queue.h"
 #include "pc/djui/djui.h"
 #include "pc/djui/djui_panel.h"
 #include "pc/djui/djui_hud_utils.h"
@@ -161,12 +160,6 @@ bool network_init(enum NetworkType inNetworkType, bool reconnecting) {
 
     // set network type
     gNetworkType = inNetworkType;
-
-    // After the backend is up, so the worker never touches an uninitialised
-    // socket, and only when we are actually networked.
-    if (gNetworkType != NT_NONE) {
-        network_send_queue_start();
-    }
 
     if (gNetworkType == NT_SERVER) {
         extern s16 gCurrSaveFileNum;
@@ -354,22 +347,16 @@ void network_send_to(u8 localIndex, struct Packet* p) {
         if (p->keepSendingAfterDisconnect) {
             localIndex = 0; // Force this type of packet to use the saved addr
         }
-        // Hand off to the send thread if it is running and will take this
-        // packet. It returns false for anything it cannot own safely, and the
-        // synchronous path below is then used unchanged -- so this is a
-        // fast-path addition, not a replacement.
-        if (!network_send_queue_push(localIndex, p)) {
-            u8* buffer = NULL;
-            u32 len = 0;
-            packet_compress(p, &buffer, &len);
-            if (!buffer || len == 0) {
-                LOG_ERROR("Failed to compress!");
-            } else {
-                CTX_BEGIN_TIMED(CTX_NET_SOCKET);
-                int rc = gNetworkSystem->send(localIndex, p->addr, buffer, len);
-                CTX_END_TIMED(CTX_NET_SOCKET);
-                if (rc == SOCKET_ERROR) { LOG_ERROR("send error %d", rc); return; }
-            }
+        u8* buffer = NULL;
+        u32 len = 0;
+        packet_compress(p, &buffer, &len);
+        if (!buffer || len == 0) {
+            LOG_ERROR("Failed to compress!");
+        } else {
+            CTX_BEGIN_TIMED(CTX_NET_SOCKET);
+            int rc = gNetworkSystem->send(localIndex, p->addr, buffer, len);
+            CTX_END_TIMED(CTX_NET_SOCKET);
+            if (rc == SOCKET_ERROR) { LOG_ERROR("send error %d", rc); return; }
         }
     }
     p->sent = true;
@@ -702,11 +689,6 @@ void network_shutdown(bool sendLeaving, bool exiting, bool popup, bool reconnect
         LOG_ERROR("no network system attached");
     } else {
         if (gNetworkPlayerLocal != NULL && sendLeaving) { network_send_leaving(gNetworkPlayerLocal->globalIndex); }
-        // Between queueing the leaving packet and closing the socket: the
-        // worker has to finish draining while the backend is still up, or the
-        // last packets of the session -- the leaving notice among them -- go out
-        // into a closed socket.
-        network_send_queue_stop();
         network_player_shutdown(popup);
         gNetworkSystem->shutdown(reconnecting);
     }
