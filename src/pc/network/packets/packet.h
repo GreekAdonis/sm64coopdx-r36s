@@ -6,6 +6,8 @@
 #include "types.h"
 #include <assert.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <string.h>
 
 #define PACKET_LENGTH 3000
 #define PACKET_DESTINATION_BROADCAST ((u8)-1)
@@ -111,8 +113,26 @@ struct Packet {
     u8 actNum;
     s16 levelNum;
     u8 areaIndex;
-    u8 buffer[PACKET_LENGTH];
+    // PACKET_LENGTH bytes of payload plus room for the four hash bytes
+    // network_send_to() writes at [dataLength, dataLength+4). packet_write()
+    // only guarantees dataLength < PACKET_LENGTH, so a packet that fills the
+    // payload to within three bytes of the limit used to put that hash past
+    // the end of the struct.
+    u8 buffer[PACKET_LENGTH + sizeof(u32)];
 };
+
+// `struct Packet p = { 0 }` zeroes all ~3048 bytes, and the packet_init() that
+// almost always follows then memsets the 3000-byte buffer a second time. Only
+// dataLength + sizeof(u32) bytes of that buffer are ever read, and every one of
+// them is written before it is read, so the zeroing is dead both times -- but
+// it is paid once per owned sync object per frame, which is on the order of
+// 480KB of memset per frame in a busy room.
+//
+// The header fields do still have to be cleared: packet_init() does not set
+// localIndex, addr, destGlobalId, or the course/act/level/area fields on
+// packets that do not match on location. `buffer` is the last member, so
+// stopping at its offset clears exactly the header and nothing else.
+#define packet_zero_header(_p) memset((_p), 0, offsetof(struct Packet, buffer))
 
 enum KickReasonType {
     EKT_CLOSE_CONNECTION,

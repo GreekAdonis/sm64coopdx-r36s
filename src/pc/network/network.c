@@ -418,13 +418,13 @@ void network_send(struct Packet* p) {
 void network_receive(u8 localIndex, void* addr, u8* data, u16 dataLength) {
 
     // receive packet
-    struct Packet p = {
-        .localIndex = localIndex,
-        .cursor = 3,
-        .addr = addr,
-        .buffer = { 0 },
-        .dataLength = dataLength,
-    };
+    // buffer is left alone: packet_decompress() overwrites it immediately.
+    struct Packet p;
+    packet_zero_header(&p);
+    p.localIndex = localIndex;
+    p.cursor     = 3;
+    p.addr       = addr;
+    p.dataLength = dataLength;
     if (!packet_decompress(&p, data, dataLength)) {
         LOG_ERROR("Failed to decompress!");
         return;

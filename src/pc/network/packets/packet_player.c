@@ -230,7 +230,8 @@ void network_send_player(u8 localIndex) {
     struct PacketPlayerData data = { 0 };
     read_packet_data(&data, &gMarioStates[localIndex]);
 
-    struct Packet p = { 0 };
+    struct Packet p;
+    packet_zero_header(&p);
     packet_init(&p, PACKET_PLAYER, false, PLMT_AREA);
     packet_write(&p, &gNetworkPlayers[localIndex].globalIndex, sizeof(u8));
     packet_write(&p, &data, sizeof(struct PacketPlayerData));
