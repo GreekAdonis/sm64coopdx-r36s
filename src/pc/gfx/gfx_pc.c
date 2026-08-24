@@ -109,6 +109,31 @@ static struct RenderingState {
     struct TextureHashmapNode *textures[2];
 } rendering_state;
 
+// Last result of the state derivation in gfx_sp_tri1(), keyed on the registers
+// it was derived from. See the comment at its use site.
+//
+// The combine mode is keyed by value rather than by a generation counter on
+// purpose. gfx_sp_tri1() mutates rdp.combine_mode in place, but only the flags
+// bitfield -- rgb1/alpha1/rgb2/alpha2 are pure inputs it never touches -- and
+// the key is captured after that mutation, so an unchanged combine mode still
+// compares equal on the next triangle. Watching the words directly means no
+// writer has to cooperate: gfx_dp_texture_rectangle() and
+// gfx_dp_fill_rectangle() both restore rdp.combine_mode by plain struct
+// assignment, which any hand-maintained dirty flag would have missed.
+static struct TriStateCache {
+    bool valid;
+    uint32_t other_mode_l;
+    uint32_t other_mode_h;
+    uint32_t geometry_mode;
+    uint32_t cc_rgb1, cc_alpha1, cc_rgb2, cc_alpha2, cc_flags;
+    const uint8_t *loaded_tex1_addr;
+    bool world_geometry;
+
+    struct ColorCombiner *comb;
+    uint8_t num_inputs;
+    bool used_textures[2];
+} sTriState;
+
 struct GfxDimensions gfx_current_dimensions = { 0 };
 
 static bool dropped_frame = false;
@@ -1265,43 +1290,90 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
         x_adjust_4by3_prev = gfx_current_dimensions.x_adjust_4by3;
     }
 
-    struct CombineMode* cm = &rdp.combine_mode;
+    // Everything from here down to shader_get_info() is a pure function of the
+    // RDP/RSP registers listed in sTriState below, and consecutive triangles in
+    // a display list almost never change any of them: at roughly fourteen
+    // triangles per draw call in a crowded scene, better than nine in ten of
+    // these derivations reproduce the previous answer exactly. Skipping them
+    // when the inputs are unchanged is what makes gfx_sp_tri1() cheap.
+    //
+    // The key is read from the same state the derivation reads, so the cache
+    // cannot go stale -- there is no dirty flag for a future caller of
+    // gfx_dp_set_other_mode() to forget to set.
+    const bool tri_world_geometry = gShaderFlagsEnabled && gShaderFlagsAny &&
+                                    (v1->world_geometry && v2->world_geometry && v3->world_geometry);
 
-    cm->use_alpha      = (rdp.other_mode_l & (G_BL_A_MEM << 18))        == 0;
-    cm->texture_edge   = (rdp.other_mode_l & CVG_X_ALPHA)               == CVG_X_ALPHA;
-    cm->use_dither     = (rdp.other_mode_l & G_AC_DITHER)               == G_AC_DITHER;
-    cm->use_2cycle     = (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE;
-    cm->use_fog        = (rdp.other_mode_l >> 30)                       == G_BL_CLR_FOG;
-    cm->light_map      = (rsp.geometry_mode & G_LIGHT_MAP_EXT)          == G_LIGHT_MAP_EXT;
-    // gShaderFlagsAny gates this as well as gShaderFlagsEnabled. world_geometry
-    // exists purely to switch on the post-processing block in the fragment
-    // shader (hue/saturation/brightness/contrast/exposure/dither/posterize/
-    // scanlines) -- it means nothing to any other backend. With every flag off,
-    // which is the default and the overwhelmingly common case, that block was
-    // still being compiled in and every fragment paid eight uniform loads,
-    // compares and branches to skip all of it. Folding "is any flag actually on"
-    // into the combine mode means the common case now selects a shader variant
-    // that has none of that code in it. The flag is already part of cm->flags
-    // and therefore of the combiner hash, so variants swap correctly when a mod
-    // turns an effect on or off.
-    cm->world_geometry = gShaderFlagsEnabled && gShaderFlagsAny &&
-                         (v1->world_geometry && v2->world_geometry && v3->world_geometry);
+    if (!sTriState.valid
+        || sTriState.other_mode_l     != rdp.other_mode_l
+        || sTriState.other_mode_h     != rdp.other_mode_h
+        || sTriState.geometry_mode    != rsp.geometry_mode
+        || sTriState.cc_rgb1          != rdp.combine_mode.rgb1
+        || sTriState.cc_alpha1        != rdp.combine_mode.alpha1
+        || sTriState.cc_rgb2          != rdp.combine_mode.rgb2
+        || sTriState.cc_alpha2        != rdp.combine_mode.alpha2
+        || sTriState.cc_flags         != rdp.combine_mode.flags
+        || sTriState.loaded_tex1_addr != rdp.loaded_texture[1].addr
+        || sTriState.world_geometry   != tri_world_geometry) {
 
-    if (cm->texture_edge) {
-        cm->use_alpha = true;
+        struct CombineMode* cm = &rdp.combine_mode;
+
+        cm->use_alpha      = (rdp.other_mode_l & (G_BL_A_MEM << 18))        == 0;
+        cm->texture_edge   = (rdp.other_mode_l & CVG_X_ALPHA)               == CVG_X_ALPHA;
+        cm->use_dither     = (rdp.other_mode_l & G_AC_DITHER)               == G_AC_DITHER;
+        cm->use_2cycle     = (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE;
+        cm->use_fog        = (rdp.other_mode_l >> 30)                       == G_BL_CLR_FOG;
+        cm->light_map      = (rsp.geometry_mode & G_LIGHT_MAP_EXT)          == G_LIGHT_MAP_EXT;
+        // gShaderFlagsAny gates this as well as gShaderFlagsEnabled. world_geometry
+        // exists purely to switch on the post-processing block in the fragment
+        // shader (hue/saturation/brightness/contrast/exposure/dither/posterize/
+        // scanlines) -- it means nothing to any other backend. With every flag off,
+        // which is the default and the overwhelmingly common case, that block was
+        // still being compiled in and every fragment paid eight uniform loads,
+        // compares and branches to skip all of it. Folding "is any flag actually on"
+        // into the combine mode means the common case now selects a shader variant
+        // that has none of that code in it. The flag is already part of cm->flags
+        // and therefore of the combiner hash, so variants swap correctly when a mod
+        // turns an effect on or off.
+        cm->world_geometry = tri_world_geometry;
+
+        if (cm->texture_edge) {
+            cm->use_alpha = true;
+        }
+
+        // hack: disable 2cycle if it uses a second texture that doesn't exist
+        // this is because old rom hacks were ported assuming that 2cycle didn't exist
+        // and were ported incorrectly
+        if (!rdp.loaded_texture[1].addr && cm->use_2cycle && gfx_cm_uses_second_texture(cm)) {
+            cm->use_2cycle = false;
+        }
+
+        sTriState.comb = gfx_lookup_or_create_color_combiner(cm);
+        gfx_rapi->shader_get_info(sTriState.comb->prg, &sTriState.num_inputs, sTriState.used_textures);
+
+        sTriState.other_mode_l     = rdp.other_mode_l;
+        sTriState.other_mode_h     = rdp.other_mode_h;
+        sTriState.geometry_mode    = rsp.geometry_mode;
+        sTriState.cc_rgb1          = rdp.combine_mode.rgb1;
+        sTriState.cc_alpha1        = rdp.combine_mode.alpha1;
+        sTriState.cc_rgb2          = rdp.combine_mode.rgb2;
+        sTriState.cc_alpha2        = rdp.combine_mode.alpha2;
+        sTriState.cc_flags         = rdp.combine_mode.flags;
+        sTriState.loaded_tex1_addr = rdp.loaded_texture[1].addr;
+        sTriState.world_geometry   = tri_world_geometry;
+        sTriState.valid            = true;
     }
 
-    // hack: disable 2cycle if it uses a second texture that doesn't exist
-    // this is because old rom hacks were ported assuming that 2cycle didn't exist
-    // and were ported incorrectly
-    if (!rdp.loaded_texture[1].addr && cm->use_2cycle && gfx_cm_uses_second_texture(cm)) {
-        cm->use_2cycle = false;
-    }
-
-    struct ColorCombiner *comb = gfx_lookup_or_create_color_combiner(cm);
-    cm = &comb->cm;
-
+    struct ColorCombiner *comb = sTriState.comb;
+    struct CombineMode *cm = &comb->cm;
     struct ShaderProgram *prg = comb->prg;
+    uint8_t num_inputs = sTriState.num_inputs;
+    bool used_textures[2] = { sTriState.used_textures[0], sTriState.used_textures[1] };
+
+    // These two guards stay outside the cache. They compare against
+    // rendering_state, which other paths -- the DJUI/2D renderer, a state reset,
+    // a backend that drops its shader -- can move without any of the registers
+    // in the key changing, so they have to be re-checked on every triangle. Both
+    // are a load and a compare in the common case.
     if (prg != rendering_state.shader_program) {
         PROFILE_ADD(shaderLoads, 1);
         FLUSH_FOR(flushShader);
@@ -1314,9 +1386,6 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
         gfx_rapi->set_use_alpha(cm->use_alpha);
         rendering_state.alpha_blend = cm->use_alpha;
     }
-    uint8_t num_inputs;
-    bool used_textures[2];
-    gfx_rapi->shader_get_info(prg, &num_inputs, used_textures);
 
     for (int32_t i = 0; i < 2; i++) {
         if (used_textures[i]) {
@@ -1345,7 +1414,13 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
         }
     }
 
-    bool z_is_from_0_to_1 = gfx_rapi->z_is_from_0_to_1();
+    // A property of the backend, fixed for the life of the process, but it was
+    // being fetched through a function pointer once per triangle -- an indirect
+    // call the compiler cannot see through, guarding a branch it could otherwise
+    // fold away entirely.
+    static int8_t sZIsFrom0To1 = -1;
+    if (sZIsFrom0To1 < 0) { sZIsFrom0To1 = gfx_rapi->z_is_from_0_to_1() ? 1 : 0; }
+    const bool z_is_from_0_to_1 = (sZIsFrom0To1 != 0);
 
     for (int32_t i = 0; i < 3; i++) {
         float z = v_arr[i]->z, w = v_arr[i]->w;
