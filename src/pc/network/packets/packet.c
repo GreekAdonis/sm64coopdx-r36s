@@ -17,6 +17,28 @@ static void increase_comp_buffer(u32 compressedLen) {
     sCompBuffer = (Bytef*)malloc(sCompBufferLen);
 }
 
+// Compress into a caller-supplied buffer. The send thread needs this: the
+// static sCompBuffer below is shared with packet_decompress(), which runs on the
+// main thread as packets arrive, so a worker compressing into it would corrupt
+// whatever is being decompressed at that moment and vice versa. Callers on the
+// main thread keep using packet_compress(), which passes the static.
+void packet_compress_into(struct Packet* p, u8* dst, u32 dstLen, u8** compBuffer, u32* compSize) {
+    uLong sourceSize = p->dataLength + sizeof(u32);
+    uLongf compressedLen = dstLen;
+
+    CTX_BEGIN_TIMED(CTX_NET_CODEC);
+    int rc = (dst ? compress2((Bytef*)dst, &compressedLen, (Bytef*)p->buffer, sourceSize, Z_BEST_SPEED) : Z_ERRNO);
+    CTX_END_TIMED(CTX_NET_CODEC);
+
+    if (dst && rc == Z_OK) {
+        *compBuffer = dst;
+        *compSize = compressedLen;
+    } else {
+        *compBuffer = NULL;
+        *compSize = 0;
+    }
+}
+
 void packet_compress(struct Packet* p, u8** compBuffer, u32* compSize) {
     uLong sourceSize = p->dataLength + sizeof(u32);
     uLongf compressedLen = compressBound(sourceSize);
