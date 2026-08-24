@@ -51,6 +51,46 @@ static const char* sLuaHookedEventTypeName[] = {
     [HOOK_MAX] = "HOOK_MAX"
 };
 
+#ifdef PROFILE_BUILD
+
+  ///////////////////////////////
+ // per-hook-type attribution //
+///////////////////////////////
+
+// hookCalls and us_hook are single global counters. They can say a frame spent
+// 16ms inside mod callbacks; they cannot say which callback. That matters
+// because hook call *volume* barely moves with player count (+3 per player
+// against a base of ~470) while hook *time* rises ~1.2ms per player -- so the
+// cost is a once-per-frame hook whose body walks the player list, and naming it
+// is the only way into that time.
+//
+// Index HOOK_MAX collects everything that does not arrive through the
+// smlua_call_event_hooks() macro: per-object behaviour callbacks and the
+// hand-written dispatchers.
+//
+// Timing is inclusive, matching the CTX timers -- a hook that triggers another
+// hook is charged for the inner one as well. The two extra clock reads per call
+// only exist in a profile build, which already pays the same pair for CTX_HOOK.
+u16 gProfileCurHookType = HOOK_MAX;
+static u32 sHookTypeCalls[HOOK_MAX + 1] = { 0 };
+static f64 sHookTypeUs[HOOK_MAX + 1] = { 0 };
+
+void profile_dump_hook_types(const char* path) {
+    FILE* f = fopen(path, "w");
+    if (!f) { return; }
+
+    fprintf(f, "hook,calls,us\n");
+    for (u32 i = 0; i <= (u32)HOOK_MAX; i++) {
+        if (sHookTypeCalls[i] == 0) { continue; }
+        const char* name = (i < (u32)HOOK_MAX) ? sLuaHookedEventTypeName[i] : "(behavior/manual)";
+        fprintf(f, "%s,%u,%.0f\n", name ? name : "(unknown)", sHookTypeCalls[i], sHookTypeUs[i]);
+    }
+
+    fclose(f);
+}
+
+#endif
+
 int smlua_call_hook(lua_State* L, int nargs, int nresults, int errfunc, struct Mod* activeMod, struct ModFile* activeModFile) {
     if (!gGameInited) { return 0; } // Don't call hooks while the game is booting
 
@@ -64,10 +104,23 @@ int smlua_call_hook(lua_State* L, int nargs, int nresults, int errfunc, struct M
 
     lua_profiler_start_counter(activeMod);
 
+#ifdef PROFILE_BUILD
+    // Claim the pending hook type and clear it, so a hook fired from inside
+    // this one's body does not inherit our label.
+    u16 profHookType = gProfileCurHookType;
+    gProfileCurHookType = HOOK_MAX;
+    f64 profStart = clock_elapsed_f64();
+#endif
+
     PROFILE_ADD(hookCalls, 1);
     CTX_BEGIN(CTX_HOOK);
     int rc = smlua_pcall(L, nargs, nresults, errfunc);
     CTX_END(CTX_HOOK);
+
+#ifdef PROFILE_BUILD
+    sHookTypeCalls[profHookType]++;
+    sHookTypeUs[profHookType] += (clock_elapsed_f64() - profStart) * 1000000.0;
+#endif
 
     lua_profiler_stop_counter(activeMod);
 

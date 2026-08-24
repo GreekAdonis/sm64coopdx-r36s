@@ -82,6 +82,12 @@ struct ProfileCounters {
 
 extern struct ProfileCounters gProfileCounters;
 
+// Writes per-hook-type call counts and microseconds to `path`, alongside the
+// CSV and the sampler dump. Defined in smlua_hooks.c, which owns both the
+// accumulators and the hook type names; declared here so profile_log.c does not
+// have to pull in the Lua headers.
+void profile_dump_hook_types(const char* path);
+
 #define PROFILE_ADD(_field, _n) (gProfileCounters._field += (u32)(_n))
 
 // Counts one appended display list: bumps dlNodes, and dlDistinct as well if

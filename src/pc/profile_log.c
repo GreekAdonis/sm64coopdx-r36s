@@ -24,6 +24,7 @@ struct ProfileCounters gProfileCounters = { 0 };
 
 static FILE *sFile = NULL;
 static char  sSamplePath[512] = { 0 };
+static char  sHookPath[512] = { 0 };
 static char  sIoBuf[1 << 16];
 static u64   sFrame = 0;
 static f64   sStartTime = 0;
@@ -87,6 +88,7 @@ void profile_log_init(void) {
     setvbuf(sFile, sIoBuf, _IOFBF, sizeof(sIoBuf));
 
     snprintf(sSamplePath, sizeof(sSamplePath), "%s.samples", path);
+    snprintf(sHookPath, sizeof(sHookPath), "%s.hooks", path);
 
     // one metadata line, then the header; both consumers (tools/profile_report.py
     // and anything reading it as plain CSV) skip lines starting with '#'
@@ -189,6 +191,7 @@ void profile_log_shutdown(void) {
     fclose(sFile);
     sFile = NULL;
     profile_sample_dump(sSamplePath);
+    profile_dump_hook_types(sHookPath);
     printf("[profile] wrote %llu frames\n", (unsigned long long)sFrame);
 }
 
