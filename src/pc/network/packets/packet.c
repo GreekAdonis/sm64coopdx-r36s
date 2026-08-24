@@ -21,7 +21,19 @@ void packet_compress(struct Packet* p, u8** compBuffer, u32* compSize) {
     uLongf compressedLen = compressBound(sourceSize);
     increase_comp_buffer(PACKET_LENGTH);
 
-    if (sCompBuffer && compress2((Bytef*)sCompBuffer, &compressedLen, (Bytef*)p->buffer, sourceSize, Z_BEST_COMPRESSION) == Z_OK) {
+    // Z_BEST_SPEED rather than Z_BEST_COMPRESSION. This runs once per outgoing
+    // packet per recipient, on the main thread, every frame -- so in a full
+    // lobby it runs dozens of times a frame on a Cortex-A35 that is already
+    // over its frame budget. Level 9 spends several times the CPU of level 1
+    // to gain a few percent of ratio, and on buffers this small (PACKET_LENGTH
+    // is 3000 bytes, most packets far less) that trade is plainly the wrong way
+    // round: the device is CPU-bound, not bandwidth-bound.
+    //
+    // Wire-compatible, so this needs no protocol bump and no agreement with
+    // peers: a zlib stream records everything uncompress() needs, and the
+    // level is not part of it. Peers still running level 9 decode our packets
+    // and we decode theirs. Decompression cost is level-independent either way.
+    if (sCompBuffer && compress2((Bytef*)sCompBuffer, &compressedLen, (Bytef*)p->buffer, sourceSize, Z_BEST_SPEED) == Z_OK) {
         *compBuffer = sCompBuffer;
         *compSize = compressedLen;
     } else {
