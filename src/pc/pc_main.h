@@ -31,6 +31,12 @@ extern struct GfxWindowManagerAPI* gWindowApi;
 extern struct GfxRenderingAPI* gRenderApi;
 
 extern bool gGameInited;
+
+// How far the simulation is behind wall clock, in seconds, as of the current
+// iteration. Positive means late. Drives should_skip_render() and is logged by
+// profile builds so the drop thresholds can be tuned against real numbers
+// rather than guessed at.
+extern f64 gSimLagSeconds;
 extern bool gGfxInited;
 
 extern f32 gMasterVolume;

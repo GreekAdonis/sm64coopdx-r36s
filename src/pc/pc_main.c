@@ -283,12 +283,6 @@ static void select_graphics_backend(void) {
 // there is relinquishing sync-object ownership so it stops speaking for objects
 // it is simulating badly.
 
-// Always draw at least every third iteration. Two is not an arbitrary choice:
-// with the measured cost of a rendered iteration against a skipped one, two
-// skips per render is what lands the simulation back on 30Hz. One is not enough
-// (it settles around 26Hz) and three buys nothing but a worse picture.
-#define RENDER_SKIP_MAX_CONSECUTIVE 2
-
 // Past this the backlog is not payable -- a level load, a mod download, or
 // hardware that simply cannot run this room. Give up on it rather than skipping
 // every render forever chasing a deadline that keeps receding.
@@ -296,13 +290,37 @@ static void select_graphics_backend(void) {
 
 static f64 sSimDeadline   = 0.0;
 static u32 sRenderSkipRun = 0;
+static bool sRenderSkipping = false;
+f64 gSimLagSeconds = 0.0;   // published for the profile log
 
+// Drops a render only once the simulation has fallen far enough behind wall
+// clock for peers to notice, and stops as soon as it is comfortably back.
+//
+// The original policy skipped whenever it was behind by any amount at all. With
+// no deadband that latches on: in a room even slightly over budget, every
+// rendered iteration puts the client behind again, so it skipped the maximum
+// every time. Run 8 measured exactly that -- the consecutive-skip run lengths
+// were {1: 10, 2: 9339}, i.e. pinned at the cap, holding 29.1Hz of simulation
+// at the cost of 14.3 displayed fps.
+//
+// Dropping renders is still the right trade when it is needed: a client behind
+// wall clock keeps owning sync objects and broadcasting state from a simulation
+// running at the wrong rate, which is what used to take whole rooms down. The
+// question is only when it is needed, and "we overran by a millisecond" is not
+// the same thing as "we are desyncing".
+//
+// So: enter at configRenderSkipEnterMs of lag, leave at configRenderSkipExitMs.
+// The gap between them is what stops the decision chattering frame to frame.
+// A room that is comfortably inside budget now never drops a frame; one that is
+// genuinely falling behind still gets protected.
 static bool should_skip_render(void) {
     // Single player has no shared clock to stay in step with, and
     // network_check_singleplayer_pause() stops the area timer there anyway.
     if (gNetworkType == NT_NONE) {
         sSimDeadline = 0.0;
         sRenderSkipRun = 0;
+        sRenderSkipping = false;
+        gSimLagSeconds = 0.0;
         return false;
     }
 
@@ -315,14 +333,32 @@ static bool should_skip_render(void) {
     // whole gNetworkAreaTimer ticks would round away.
     sSimDeadline += sFrameTime;
     f64 behind = now - sSimDeadline;
+    gSimLagSeconds = behind;
 
     if (behind > RENDER_SKIP_GIVE_UP_SECONDS || behind < -RENDER_SKIP_GIVE_UP_SECONDS) {
         sSimDeadline = now;
         sRenderSkipRun = 0;
+        sRenderSkipping = false;
+        gSimLagSeconds = 0.0;
         return false;
     }
 
-    if (behind <= 0.0 || sRenderSkipRun >= RENDER_SKIP_MAX_CONSECUTIVE) {
+    if (configRenderSkipMax == 0) {
+        sRenderSkipping = false;
+        sRenderSkipRun = 0;
+        return false;
+    }
+
+    const f64 enter = configRenderSkipEnterMs / 1000.0;
+    const f64 exit  = configRenderSkipExitMs / 1000.0;
+
+    if (sRenderSkipping) {
+        if (behind < exit) { sRenderSkipping = false; }
+    } else if (behind > enter) {
+        sRenderSkipping = true;
+    }
+
+    if (!sRenderSkipping || sRenderSkipRun >= configRenderSkipMax) {
         sRenderSkipRun = 0;
         return false;
     }

@@ -105,6 +105,11 @@ unsigned int configFrameLimit                     = 60;
 #endif
 unsigned int configInterpolationMode              = 1;
 unsigned int configDrawDistance                   = 6;
+// Render dropping, tunable without a rebuild -- see should_skip_render() in
+// pc_main.c. Thresholds are milliseconds of simulation lag; 33 is one 30Hz tick.
+unsigned int configRenderSkipEnterMs              = 66; // start dropping at 2 ticks behind
+unsigned int configRenderSkipExitMs               = 16; // stop once back within half a tick
+unsigned int configRenderSkipMax                  = 2;  // most consecutive drops; 0 disables
 #ifdef HANDHELD
 unsigned int configHandheldResW                   = 0; // internal render width; 0 = use built-in default
 unsigned int configHandheldResH                   = 0; // internal render height; 0 = use built-in default
@@ -297,6 +302,9 @@ static const struct ConfigOption options[] = {
     {.name = "show_fps",                       .type = CONFIG_TYPE_BOOL, .boolValue = &configShowFPS},
     {.name = "show_ping",                      .type = CONFIG_TYPE_BOOL, .boolValue = &configShowPing},
     {.name = "framerate_mode",                 .type = CONFIG_TYPE_UINT, .uintValue = &configFramerateMode},
+    {.name = "render_skip_enter_ms",           .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipEnterMs},
+    {.name = "render_skip_exit_ms",            .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipExitMs},
+    {.name = "render_skip_max",                .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipMax},
     {.name = "frame_limit",                    .type = CONFIG_TYPE_UINT, .uintValue = &configFrameLimit},
     {.name = "interpolation_mode",             .type = CONFIG_TYPE_UINT, .uintValue = &configInterpolationMode},
     {.name = "coop_draw_distance",             .type = CONFIG_TYPE_UINT, .uintValue = &configDrawDistance},
@@ -857,6 +865,13 @@ NEXT_OPTION:
     if (configGraphicsBackend < GAPI_GL || configGraphicsBackend > GAPI_MAX) { configGraphicsBackend = GAPI_GL; }
 
     if (configFramerateMode < 0 || configFramerateMode > RRM_MAX) { configFramerateMode = 0; }
+    // An exit threshold at or above the enter threshold would latch the policy
+    // on forever, and more than a handful of consecutive drops is a black screen.
+    if (configRenderSkipMax > 8) { configRenderSkipMax = 8; }
+    if (configRenderSkipEnterMs > 2000) { configRenderSkipEnterMs = 2000; }
+    if (configRenderSkipExitMs >= configRenderSkipEnterMs) {
+        configRenderSkipExitMs = configRenderSkipEnterMs / 4;
+    }
     if (configFrameLimit < 30)   { configFrameLimit = 30; }
     if (configFrameLimit > 3000) { configFrameLimit = 3000; }
 

@@ -64,6 +64,9 @@ extern enum RefreshRateMode configFramerateMode;
 extern unsigned int configFrameLimit;
 extern unsigned int configInterpolationMode;
 extern unsigned int configDrawDistance;
+extern unsigned int configRenderSkipEnterMs;
+extern unsigned int configRenderSkipExitMs;
+extern unsigned int configRenderSkipMax;
 #ifdef HANDHELD
 extern unsigned int configHandheldResW;
 extern unsigned int configHandheldResH;

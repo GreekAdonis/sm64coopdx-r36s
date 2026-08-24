@@ -16,6 +16,7 @@
 #include "game/level_update.h"
 #include "game/object_list_processor.h"
 #include "pc/network/network_player.h"
+#include "pc/pc_main.h"
 
 #define PROFILE_FLUSH_INTERVAL 128
 #define PROFILE_DEFAULT_PATH   "sm64coopdx-profile.csv"
@@ -105,7 +106,7 @@ void profile_log_init(void) {
             "draws,tris,verts,texloads,texbytes,texflushes,binds,bindskips,impskips,shaders,"
             "fldepth,flviewport,flshader,flalpha,fltexture,flsampler,flfull,flcomb,"
             "hookcalls,hookbhv,fieldgets,fieldsets,codeccomp,codecdecomp,"
-            "objsdrawn,dlnodes,dldistinct,renderskips,"
+            "objsdrawn,dlnodes,dldistinct,renderskips,simlag_us,"
             "mario_x,mario_y,mario_z\n");
 
     sStartTime = clock_elapsed_f64();
@@ -140,7 +141,7 @@ void profile_log_frame(void) {
             "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
             "%u,%u,%u,%u,%u,%u,%u,%u,"
             "%u,%u,%u,%u,%u,%u,"
-            "%u,%u,%u,%u,"
+            "%u,%u,%u,%u,%d,"
             "%d,%d,%d\n",
             (unsigned long long)sFrame,
             clock_elapsed_f64() - sStartTime,
@@ -171,6 +172,7 @@ void profile_log_frame(void) {
             c->hookCalls, c->hookBehavior, c->luaFieldGets, c->luaFieldSets,
             c->codecCompressCalls, c->codecDecompressCalls,
             c->objsDrawn, c->dlNodes, c->dlDistinct, c->renderSkips,
+            (int)(gSimLagSeconds * 1000000.0),
             (int)m->pos[0], (int)m->pos[1], (int)m->pos[2]);
 
     sFrame++;
