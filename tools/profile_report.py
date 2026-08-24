@@ -41,7 +41,7 @@ TIMINGS = [
 
 COUNTERS = ["subframes", "draws", "tris", "verts", "texloads", "texbytes",
             "texflushes", "binds", "bindskips", "impskips", "shaders", "objects",
-            "players"]
+            "players", "hookcalls", "hookbhv", "fieldgets", "fieldsets"]
 
 # Why each batch split happened. Absent from older logs; the printer skips
 # whatever a given CSV does not carry.
@@ -134,6 +134,31 @@ def report_frames(meta, rows, top_n):
             vals = [r[key] for r in rows]
             print(f"  {key:12} mean {mean(vals):8.1f}   p50 {pct(vals,50):6}   "
                   f"max {max(vals):6}   {100.0*totals[key]/grand:5.1f}% of splits")
+
+    if "hookcalls" in rows[0]:
+        # The decisive ratio. us_hook is time spent inside smlua_call_hook() and
+        # hookcalls counts exactly those calls, so their quotient says where the
+        # time actually is. A few microseconds each means the engine's per-call
+        # overhead dominates, which is worth fixing once for every mod. Hundreds
+        # of microseconds each means the time is inside mod bytecode, where no
+        # client-side change reaches it.
+        n = len(rows)
+        calls = sum(r["hookcalls"] for r in rows)
+        bhv = sum(r["hookbhv"] for r in rows)
+        gets = sum(r["fieldgets"] for r in rows)
+        sets = sum(r["fieldsets"] for r in rows)
+        hook_us = sum(r.get("us_hook", 0) for r in rows)
+        print("\nlua traffic per frame:")
+        print(f"  hook calls        {calls/n:10.1f}   ({bhv/n:.1f} per-object behaviour)")
+        print(f"  field gets        {gets/n:10.1f}")
+        print(f"  field sets        {sets/n:10.1f}")
+        if calls:
+            per = hook_us / calls
+            verdict = ("per-call overhead dominates; engine-side work helps every mod"
+                       if per < 20 else
+                       "time is inside mod bytecode; engine-side work will not reach it")
+            print(f"  -> us per call    {per:10.2f}   {verdict}")
+            print(f"  -> field accesses per call {(gets+sets)/calls:10.1f}")
 
     print(f"\nworst {top_n} frames by work:")
     worst = sorted(rows, key=busy, reverse=True)[:top_n]

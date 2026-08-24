@@ -121,7 +121,15 @@ How to read the result:
 - **`object update` dominates** — behaviours and object collision; correlate
   with the `objects` counter.
 - **`lua hooks` dominates** — a mod. The in-game Lua profiler
-  (`lua_profiler true`) attributes it per mod.
+  (`lua_profiler true`) attributes it per mod, and the "lua traffic" table
+  says whether that time is reachable from the engine at all. `us per call`
+  is `us_hook` divided by the number of `smlua_call_hook()` invocations: a
+  few microseconds means the binding's per-call overhead dominates and fixing
+  it helps every mod at once, while hundreds of microseconds means the time is
+  inside mod bytecode and no client-side change will reach it. `field
+  accesses per call` counts the cobject `__index`/`__newindex` path, which
+  scales with how hard a mod pokes at object fields rather than with how much
+  work it does.
 - **`display list -> GL` is large but `tris` is small** — batch fragmentation,
   not geometry. Read the "what split the batches" table: it attributes every
   draw call to the state change that forced it (`fltexture`, `flshader`,

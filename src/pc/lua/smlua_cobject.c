@@ -10,6 +10,7 @@
 #include "game/scroll_targets.h"
 #include "game/rendering_graph_node.h"
 #include "audio/external.h"
+#include "pc/profile_log.h"
 #include "object_fields.h"
 #include "pc/djui/djui_hud_utils.h"
 #include "pc/lua/smlua.h"
@@ -572,6 +573,7 @@ static bool smlua_set_field(lua_State* L, u8* p, struct LuaObjectField *data) {
 }
 
 static int smlua__get_field(lua_State* L) {
+    PROFILE_ADD(luaFieldGets, 1);
     LUA_STACK_CHECK_BEGIN_NUM(L, 1);
 
     const CObject *cobj = lua_touserdata(L, 1);
@@ -691,6 +693,7 @@ static int smlua__get_field(lua_State* L) {
 }
 
 static int smlua__set_field(lua_State* L) {
+    PROFILE_ADD(luaFieldSets, 1);
     LUA_STACK_CHECK_BEGIN(L);
 
     const CObject *cobj = lua_touserdata(L, 1);

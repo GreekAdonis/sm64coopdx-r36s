@@ -24,6 +24,18 @@ struct ProfileCounters {
     u32 shaderLoads;     // shader program switches
     u32 subFrames;       // rendered frames produced for this game frame
 
+    // Lua traffic. us_hook divided by hookCalls is the average cost of one
+    // call into a mod, which is what says whether the engine's per-call
+    // overhead is worth attacking: many cheap calls are the engine's problem,
+    // a few expensive ones are the mod's and no client-side change touches
+    // them. Field gets/sets count the cobject __index/__newindex path, the
+    // hottest thing in the binding and the one that scales with how hard mods
+    // poke at object fields rather than with how much work they do.
+    u32 hookCalls;       // every smlua_call_hook() -- exactly what CTX_HOOK times
+    u32 hookBehavior;    // of those, per-object behaviour callbacks
+    u32 luaFieldGets;    // cobject __index
+    u32 luaFieldSets;    // cobject __newindex
+
     // Which state change forced each batch split, counted only when the vertex
     // buffer actually had geometry to emit. These sum to drawCalls (minus the
     // end-of-frame and HUD-pass flushes) and say where a frame's draw calls

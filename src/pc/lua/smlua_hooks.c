@@ -12,6 +12,7 @@
 #include "game/hud.h"
 #include "game/level_update.h"
 #include "pc/debug_context.h"
+#include "pc/profile_log.h"
 #include "pc/network/network.h"
 #include "pc/network/network_player.h"
 #include "pc/network/socket/socket.h"
@@ -63,6 +64,7 @@ int smlua_call_hook(lua_State* L, int nargs, int nresults, int errfunc, struct M
 
     lua_profiler_start_counter(activeMod);
 
+    PROFILE_ADD(hookCalls, 1);
     CTX_BEGIN(CTX_HOOK);
     int rc = smlua_pcall(L, nargs, nresults, errfunc);
     CTX_END(CTX_HOOK);
@@ -1155,6 +1157,7 @@ void smlua_call_behavior_hook(struct Object* object) {
             smlua_push_object(L, LOT_OBJECT, object, NULL);
 
             // call the callback
+            PROFILE_ADD(hookBehavior, 1);
             if (0 != smlua_call_hook(L, 1, 0, 0, callback->mod, callback->modFile)) {
                 LOG_LUA("Failed to call behavior %s callback for behavior id: %hu",
                     (init ? "init" : "loop"), hooked->behaviorId

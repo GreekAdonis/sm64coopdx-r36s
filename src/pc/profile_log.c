@@ -72,6 +72,7 @@ void profile_log_init(void) {
             "us_swap,us_delay,"
             "draws,tris,verts,texloads,texbytes,texflushes,binds,bindskips,impskips,shaders,"
             "fldepth,flviewport,flshader,flalpha,fltexture,flsampler,flfull,flcomb,"
+            "hookcalls,hookbhv,fieldgets,fieldsets,"
             "mario_x,mario_y,mario_z\n");
 
     sStartTime = clock_elapsed_f64();
@@ -105,6 +106,7 @@ void profile_log_frame(void) {
             "%d,%d,"
             "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
             "%u,%u,%u,%u,%u,%u,%u,%u,"
+            "%u,%u,%u,%u,"
             "%d,%d,%d\n",
             (unsigned long long)sFrame,
             clock_elapsed_f64() - sStartTime,
@@ -130,6 +132,7 @@ void profile_log_frame(void) {
             c->texCacheFlushes, c->texBinds, c->texBindSkips, c->texImportSkips, c->shaderLoads,
             c->flushDepth, c->flushViewport, c->flushShader, c->flushAlpha,
             c->flushTexture, c->flushSampler, c->flushBufferFull, c->flushCombiner,
+            c->hookCalls, c->hookBehavior, c->luaFieldGets, c->luaFieldSets,
             (int)m->pos[0], (int)m->pos[1], (int)m->pos[2]);
 
     sFrame++;
