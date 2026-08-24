@@ -110,6 +110,10 @@ unsigned int configDrawDistance                   = 6;
 unsigned int configRenderSkipEnterMs              = 66; // start dropping at 2 ticks behind
 unsigned int configRenderSkipExitMs               = 16; // stop once back within half a tick
 unsigned int configRenderSkipMax                  = 2;  // most consecutive drops; 0 disables
+// Group same-display-list instances in the opaque master list before emitting.
+// Runtime-toggleable so the picture can be compared with and without it in one
+// session -- it reorders draws, so "is it correct" wants an A/B, not a rebuild.
+bool         configRenderBatchOpaque              = true;
 #ifdef HANDHELD
 unsigned int configHandheldResW                   = 0; // internal render width; 0 = use built-in default
 unsigned int configHandheldResH                   = 0; // internal render height; 0 = use built-in default
@@ -305,6 +309,7 @@ static const struct ConfigOption options[] = {
     {.name = "render_skip_enter_ms",           .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipEnterMs},
     {.name = "render_skip_exit_ms",            .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipExitMs},
     {.name = "render_skip_max",                .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipMax},
+    {.name = "render_batch_opaque",            .type = CONFIG_TYPE_BOOL, .boolValue = &configRenderBatchOpaque},
     {.name = "frame_limit",                    .type = CONFIG_TYPE_UINT, .uintValue = &configFrameLimit},
     {.name = "interpolation_mode",             .type = CONFIG_TYPE_UINT, .uintValue = &configInterpolationMode},
     {.name = "coop_draw_distance",             .type = CONFIG_TYPE_UINT, .uintValue = &configDrawDistance},

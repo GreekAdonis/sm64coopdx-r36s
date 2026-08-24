@@ -17,6 +17,7 @@
 #include "pc/utils/misc.h"
 #include "pc/debuglog.h"
 #include "pc/profile_log.h"
+#include "pc/configfile.h"
 #include "skybox.h"
 #include "first_person_cam.h"
 #include "course_table.h"
@@ -560,6 +561,90 @@ static u8 increment_mat_stack(void) {
 /**
  * Process a master list node.
  */
+  ////////////////////////////////////
+ // same-display-list batching      //
+////////////////////////////////////
+
+// The master list is walked in the order nodes were appended, which is scene
+// graph order. Instances of one model share a Gfx* (obj_set_model ->
+// dynos_model_get_geo -> sharedChild), and a shared display list implies the
+// same colour combiner and the same textures -- but those instances are
+// scattered through the list, so the renderer rebinds a shader or re-imports a
+// texture between them and splits the batch every time.
+//
+// Run 8 measured 472 appended nodes against 92 distinct display lists, so each
+// one is emitted 5.1 times per frame, and 90% of all draw calls existed because
+// the shader or the texture changed. Grouping instances that share a pointer
+// collapses both causes at once.
+//
+// Only for layers where draw order is not observable. LAYER_OPAQUE is
+// z-buffered, depth-writing and unblended, so it qualifies. The decal layers
+// are ordered against the surface they decal, the transparent layers are
+// order-dependent by definition, and LAYER_FORCE is explicitly ordered -- none
+// of those may be touched.
+//
+// The permutation is stable: groups appear in order of first appearance and
+// nodes keep their relative order within a group. That matters because
+// patch_mtx_interpolated walks the interpolation table in emit order, and each
+// node is emitted as a self-contained gSPMatrix + gSPDisplayList pair.
+#define GEO_BUCKET_SLOTS 512  // power of two, comfortably above the ~92 distinct seen
+
+static struct GeoBucket {
+    const void *displayList;
+    struct DisplayListNode *tail;
+    u32 gen;
+} sGeoBuckets[GEO_BUCKET_SLOTS];
+static u32 sGeoBucketGen = 0;
+
+static struct DisplayListNode *geo_bucket_by_display_list(struct DisplayListNode *list) {
+    struct DisplayListNode *outHead = NULL;
+    struct DisplayListNode *outTail = NULL;
+    const u32 gen = ++sGeoBucketGen;
+
+    for (struct DisplayListNode *n = list; n != NULL; ) {
+        struct DisplayListNode *next = n->next;
+        const void *dl = n->displayList;
+
+        // Display lists are at least 8-byte aligned, so the low bits carry
+        // nothing. Drop them, mix, take the high bits.
+        u64 h = (u64) (uintptr_t) dl >> 3;
+        h *= 0x9E3779B97F4A7C15ULL;
+        u32 i = (u32) (h >> 48) & (GEO_BUCKET_SLOTS - 1);
+
+        u32 probes = 0;
+        while (sGeoBuckets[i].gen == gen && sGeoBuckets[i].displayList != dl) {
+            i = (i + 1) & (GEO_BUCKET_SLOTS - 1);
+            if (++probes >= GEO_BUCKET_SLOTS) { break; }
+        }
+
+        bool tracked = (probes < GEO_BUCKET_SLOTS);
+        if (tracked && sGeoBuckets[i].gen == gen) {
+            // Seen this display list already: splice in directly after the
+            // group's current tail, leaving everything after it untouched.
+            struct DisplayListNode *tail = sGeoBuckets[i].tail;
+            n->next = tail->next;
+            tail->next = n;
+            if (outTail == tail) { outTail = n; }
+            sGeoBuckets[i].tail = n;
+        } else {
+            // First of its group -- or the table is full, in which case falling
+            // through here just leaves this node unbatched rather than wrong.
+            n->next = NULL;
+            if (outTail != NULL) { outTail->next = n; } else { outHead = n; }
+            outTail = n;
+            if (tracked) {
+                sGeoBuckets[i].gen = gen;
+                sGeoBuckets[i].displayList = dl;
+                sGeoBuckets[i].tail = n;
+            }
+        }
+
+        n = next;
+    }
+
+    return outHead;
+}
+
 static void geo_process_master_list_sub(struct GraphNodeMasterList *node) {
     struct DisplayListNode *currList = NULL;
     s32 enableZBuffer = (node->node.flags & GRAPH_RENDER_Z_BUFFER) != 0;
@@ -580,6 +665,13 @@ static void geo_process_master_list_sub(struct GraphNodeMasterList *node) {
     }
 
     for (s32 i = 0; i < GFX_NUM_MASTER_LISTS; i++) {
+        if (i == LAYER_OPAQUE && configRenderBatchOpaque && node->listHeads[i] != NULL) {
+            node->listHeads[i] = geo_bucket_by_display_list(node->listHeads[i]);
+            // listTails[i] is now stale, but nothing reads it again: it is only
+            // consulted while appending, and the next frame's first append
+            // rewrites it before it can be read (listHeads is nulled in
+            // geo_process_master_list, so the append takes the head branch).
+        }
         if ((currList = node->listHeads[i]) != NULL) {
             gDPSetRenderMode(gDisplayListHead++, modeList->modes[i], mode2List->modes[i]);
             while (currList != NULL) {
