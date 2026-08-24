@@ -314,11 +314,50 @@ def report_samples(path, binary, top_n):
         print(f"    {100.0*count/total:6.2f}%  {count:7}  {name}")
 
 
+def report_hooks(path, frames):
+    """Per-hook-type call counts and time, written by smlua_hooks.c.
+
+    us_hook says how much of a frame went into mod callbacks; this says which
+    ones. Hook call volume barely moves with player count while hook time
+    climbs, so the interesting column is us/call -- a hook whose body walks the
+    player list shows up as a small number of very expensive calls.
+    """
+    try:
+        with open(path) as f:
+            rows = list(csv.DictReader(f))
+    except OSError:
+        return
+
+    entries = []
+    for r in rows:
+        try:
+            calls, us = int(r["calls"]), float(r["us"])
+        except (KeyError, ValueError):
+            continue
+        if calls:
+            entries.append((r["hook"], calls, us))
+    if not entries:
+        return
+
+    total_us = sum(e[2] for e in entries)
+    print("\n" + "=" * 78)
+    print("HOOK TYPES (whole session)")
+    print("=" * 78)
+    print(f"  {total_us/1e6:.1f}s across {sum(e[1] for e in entries)} calls"
+          f" over {frames} frames\n")
+    print(f"  {'hook':<44} {'calls':>9} {'us/frame':>9} {'us/call':>8} {'share':>6}")
+    for name, calls, us in sorted(entries, key=lambda e: -e[2]):
+        print(f"  {name:<44} {calls:>9} {us/frames:>9.1f} {us/calls:>8.1f}"
+              f" {100.0*us/total_us:>5.1f}%")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("csv")
     ap.add_argument("--samples", default=None,
                     help="defaults to <csv>.samples")
+    ap.add_argument("--hooks", default=None,
+                    help="defaults to <csv>.hooks")
     ap.add_argument("--binary", default=None,
                     help="unstripped build that produced the samples")
     ap.add_argument("--top", type=int, default=25)
@@ -336,6 +375,7 @@ def main():
     report_frames(meta, rows, args.top)
     report_levels(rows)
     report_samples(args.samples or args.csv + ".samples", args.binary, args.top)
+    report_hooks(args.hooks or args.csv + ".hooks", len(rows))
     return 0
 
 

@@ -4,8 +4,25 @@ Implementation plan for the findings in `rk3326-cpu-investigation.md` (part 1) a
 `rk3326-cpu-investigation-2-player-scaling.md` (part 2).
 
 Base: `worktree-interp-skip-tri-dirty` @ `c2196e8c8`.
-Proposed implementation branch: `worktree-rk3326-cpu-opt`, branched from
-`c2196e8c8`, with the two investigation docs cherry-picked across.
+Implementation branch: `worktree-rk3326-cpu-opt`, branched from `c2196e8c8`.
+
+> **Status: Milestone 1 is implemented and ready to build.** Six commits.
+> Everything in it landed except item 1.6, the O(1) tri-state guard, which moved
+> to Milestone 2 — see the note under that item for why. Every changed file is
+> `-Wall -Wextra` clean under both the profile and release configurations.
+>
+> Two pre-existing memory-safety bugs turned up while implementing and are fixed
+> in passing; both are described in their items below.
+>
+> | | change | commit |
+> |---|---|---|
+> | 1.1 | per-hook-type attribution | `785eea636` |
+> | 1.2 | codec call counters | folded into `376efd0ee` |
+> | 1.3 | persistent `z_stream` + heap overflow fix | `376efd0ee` |
+> | 1.4 | stop double-zeroing packets + stack overflow fix | `405069936` |
+> | 1.5 | `sync_object_should_own` | `467798a76` |
+> | 1.6 | O(1) tri-state guard | **deferred to Milestone 2** |
+> | 1.7 | fewer GL calls per shader switch | `6c8508e40` |
 
 **Goal.** The 9-player frame does 39.3ms of work against 33.3ms. It spans 2.34
 vblanks, rounds to 3, and presents as 20fps. We need ~5.6ms, and partial credit
@@ -146,14 +163,26 @@ Separately, change `player_distance()`'s `sqrt` to `sqrtf` — it promotes three
 triangles). Replace the key with a single `u32` version counter bumped by the
 setters that write those registers.
 
-**Risk:** a missed writer means a stale cache and wrong rendering. Mitigate with
-a cross-check compiled only under `DEVELOPMENT`/`PROFILE_BUILD` — keep the
-eleven-field comparison, assert it agrees with the version comparison, and log
-loudly if not. That converts "did I find every writer?" from a code-reading
-exercise into something the profile build answers on its own.
+**Deferred to Milestone 2.** Two reasons found while implementing:
 
-This answers part 1's open thread. The cache is *not* the problem — do not revert
-`9d59484d6`.
+1. The cache's own comment already records this decision and argues against it:
+   *"The combine mode is keyed by value rather than by a generation counter on
+   purpose… Watching the words directly means no writer has to cooperate:
+   `gfx_dp_texture_rectangle()` and `gfx_dp_fill_rectangle()` both restore
+   `rdp.combine_mode` by plain struct assignment, which any hand-maintained
+   dirty flag would have missed."* Overriding that needs the verification build
+   to actually run, not just to exist.
+2. The mitigation is self-defeating as specified. If the cross-check is compiled
+   into profile builds, the profile build keeps paying the eleven comparisons —
+   so the capture we measure with would not show the win. It needs its own
+   build, and a build is exactly the resource this plan is rationing.
+
+Milestone 2 already includes a visual-verification step and a runtime toggle for
+the bucketing work, so the guard belongs in that build, where the same session
+can check both.
+
+This still answers part 1's open thread: the cache is *not* the problem, the
+guard is. Do not revert `9d59484d6`.
 
 ### 1.7 Fewer GL calls per shader switch — **~0.4–0.8 ms**
 
@@ -174,16 +203,28 @@ calls into a `libGLESv2` that is already 24% of the main thread:
 
 ### Milestone 1 exit check
 
+Capture as before, then `tools/profile_report.py <csv> --binary <unstripped>`.
+It now also prints a **HOOK TYPES** section from the new `<csv>.hooks` file;
+the column to read there is **us/call**, since a hook whose body walks the
+player list shows up as a small number of very expensive calls.
+
 | signal | expectation |
 |---|---|
 | `us_netcodec` | 2.5ms → **< 0.4ms** |
-| `us_netcodec / codeccalls` | 7–15× lower |
-| `us_gfxdl` at constant `draws`/`shaders` | down ~0.6–1.2ms |
+| `us_netcodec / codeccomp` | 7–15× lower per call |
+| `us_gfxdl` at constant `draws`/`shaders` | down ~0.4–0.8ms |
 | `us_net` − codec − socket | down ~0.2–0.5ms |
-| rendering | pixel-identical; any `DEVELOPMENT` tri-state assert firing is a bug |
+| rendering | pixel-identical — nothing in Milestone 1 changes what is drawn |
+| `<csv>.hooks` | names the hooks carrying the ~1.2ms/player |
 
 If `us_netcodec` does not collapse, stop and re-measure before continuing — it
 would mean the compression cost is not where the benchmark says it is.
+
+The renderer change in 1.7 is the only item that could plausibly break the
+picture, and it fails loudly rather than subtly: a desynchronised attribute
+mirror means geometry reads the wrong vertex layout, which is immediately
+obvious. If anything looks wrong, revert `6c8508e40` alone; the rest of the
+milestone is independent of it.
 
 ---
 
