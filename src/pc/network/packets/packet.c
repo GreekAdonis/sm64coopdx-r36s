@@ -3,6 +3,7 @@
 #include "../network.h"
 #include "pc/network/ban_list.h"
 #include "pc/debuglog.h"
+#include "pc/debug_context.h"
 
 static u32 sCompBufferLen = 0;
 static Bytef* sCompBuffer = NULL;
@@ -33,7 +34,10 @@ void packet_compress(struct Packet* p, u8** compBuffer, u32* compSize) {
     // peers: a zlib stream records everything uncompress() needs, and the
     // level is not part of it. Peers still running level 9 decode our packets
     // and we decode theirs. Decompression cost is level-independent either way.
-    if (sCompBuffer && compress2((Bytef*)sCompBuffer, &compressedLen, (Bytef*)p->buffer, sourceSize, Z_BEST_SPEED) == Z_OK) {
+    CTX_BEGIN_TIMED(CTX_NET_CODEC);
+    int rc = (sCompBuffer ? compress2((Bytef*)sCompBuffer, &compressedLen, (Bytef*)p->buffer, sourceSize, Z_BEST_SPEED) : Z_ERRNO);
+    CTX_END_TIMED(CTX_NET_CODEC);
+    if (sCompBuffer && rc == Z_OK) {
         *compBuffer = sCompBuffer;
         *compSize = compressedLen;
     } else {
@@ -46,7 +50,10 @@ bool packet_decompress(struct Packet* p, u8* compBuffer, u32 compSize) {
     increase_comp_buffer(PACKET_LENGTH);
     if (!sCompBuffer) { return false; }
     uLong decompSize = PACKET_LENGTH;
-    if (uncompress((Bytef*)p->buffer, &decompSize, (Bytef*)compBuffer, compSize) == Z_OK) {
+    CTX_BEGIN_TIMED(CTX_NET_CODEC);
+    int rc = uncompress((Bytef*)p->buffer, &decompSize, (Bytef*)compBuffer, compSize);
+    CTX_END_TIMED(CTX_NET_CODEC);
+    if (rc == Z_OK) {
         p->dataLength = decompSize - sizeof(u32);
         return true;
     } else {

@@ -67,7 +67,7 @@ void profile_log_init(void) {
 
     fprintf(sFile,
             "frame,time_s,level,area,act,players,objects,subframes,"
-            "us_total,us_net,us_interp,us_game,us_levelscript,us_objects,us_geo,"
+            "us_total,us_net,us_netcodec,us_netsocket,us_interp,us_game,us_levelscript,us_objects,us_geo,"
             "us_smlua,us_hook,us_audio,us_render,us_gfxdl,us_lighting,us_texupload,"
             "us_swap,us_delay,"
             "draws,tris,verts,texloads,texbytes,texflushes,binds,bindskips,impskips,shaders,"
@@ -103,7 +103,7 @@ void profile_log_frame(void) {
             "%llu,%.3f,%d,%d,%d,%d,%u,%u,"
             "%d,%d,%d,%d,%d,%d,%d,"
             "%d,%d,%d,%d,%d,%d,%d,"
-            "%d,%d,"
+            "%d,%d,%d,%d,"
             "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
             "%u,%u,%u,%u,%u,%u,%u,%u,"
             "%u,%u,%u,%u,"
@@ -114,6 +114,8 @@ void profile_log_frame(void) {
             (int)network_player_connected_count(), gObjectCounter, c->subFrames,
             profile_ctx_us(CTX_TOTAL),
             profile_ctx_us(CTX_NETWORK),
+            profile_ctx_us(CTX_NET_CODEC),
+            profile_ctx_us(CTX_NET_SOCKET),
             profile_ctx_us(CTX_INTERP),
             profile_ctx_us(CTX_GAME_LOOP),
             profile_ctx_us(CTX_LEVEL_SCRIPT),

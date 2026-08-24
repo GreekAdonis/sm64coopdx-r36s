@@ -43,6 +43,12 @@ enum DebugContext {
     CTX_GFX_DL,      // gfx_run()/gfx_end_frame_render(): DL interpretation + GL calls
     CTX_TEXUPLOAD,   // rapi->upload_texture(): CPU repack + glTexImage2D
     CTX_SWAP,        // gfx_display_frame(): SwapWindow, where a GPU-bound frame stalls
+    // Network work that has no dependency on game state and could therefore run
+    // on another core. Whatever CTX_NETWORK holds beyond these two is coupled to
+    // the object pool and the player list and has to stay on the main thread, so
+    // the pair sets a ceiling on what threading the network could actually buy.
+    CTX_NET_CODEC,   // zlib compress/decompress of packet payloads
+    CTX_NET_SOCKET,  // the send syscall itself
     CTX_DELAY,       // frame-cap sleep/busy-wait; idle time, not work
     CTX_MAX,
     // MUST BE KEPT IN SYNC WITH sDebugContextNames

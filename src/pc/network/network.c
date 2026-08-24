@@ -47,6 +47,7 @@
 #undef near
 #undef far
 #include "game/rendering_graph_node.h"
+#include "pc/debug_context.h"
 
 // Mario 64 specific externs
 extern s16 sCurrPlayMode;
@@ -352,7 +353,9 @@ void network_send_to(u8 localIndex, struct Packet* p) {
         if (!buffer || len == 0) {
             LOG_ERROR("Failed to compress!");
         } else {
+            CTX_BEGIN_TIMED(CTX_NET_SOCKET);
             int rc = gNetworkSystem->send(localIndex, p->addr, buffer, len);
+            CTX_END_TIMED(CTX_NET_SOCKET);
             if (rc == SOCKET_ERROR) { LOG_ERROR("send error %d", rc); return; }
         }
     }

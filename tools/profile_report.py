@@ -24,6 +24,8 @@ TIMINGS = [
     ("us_total", "TOTAL (whole frame, includes the frame-cap wait)"),
     ("us_delay", "  frame-cap wait (idle)"),
     ("us_net", "  network"),
+    ("us_netcodec", "    packet compress/decompress (threadable)"),
+    ("us_netsocket", "    send syscall (threadable)"),
     ("us_game", "  game loop"),
     ("us_levelscript", "    level script"),
     ("us_objects", "      object update"),
