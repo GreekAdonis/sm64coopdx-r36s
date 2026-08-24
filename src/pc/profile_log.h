@@ -48,11 +48,33 @@ struct ProfileCounters {
     u32 flushSampler;    // filter/clamp/mirror parameters
     u32 flushBufferFull; // hit MAX_BUFFERED triangles
     u32 flushCombiner;   // a new colour combiner had to be built
+
+    // What the geo pass actually handed the renderer, which is what the
+    // renderer's cost is proportional to -- the objects column counts what is
+    // alive, not what is drawn, and nothing else here bridges the two.
+    //
+    // objsDrawn against objects says how much the existing frustum cull is
+    // already removing, and therefore how much is left for a tighter one.
+    //
+    // dlDistinct against dlNodes says how many appended nodes share a display
+    // list. Instances of one model resolve to the same shared Gfx pointer, so a
+    // small dlDistinct against a large dlNodes means a same-display-list
+    // batching pass has something to collapse; if they track each other, the
+    // geometry is per-instance and no such pass would help.
+    u32 objsDrawn;       // objects that passed obj_is_in_view() and were rendered
+    u32 dlNodes;         // display lists appended to the master lists
+    u32 dlDistinct;      // distinct display list pointers among them
 };
 
 extern struct ProfileCounters gProfileCounters;
 
 #define PROFILE_ADD(_field, _n) (gProfileCounters._field += (u32)(_n))
+
+// Counts one appended display list: bumps dlNodes, and dlDistinct as well if
+// this pointer has not already been seen this frame. Out of line because it
+// needs a per-frame set, which lives in profile_log.c next to the reset.
+void profile_note_display_list(const void *displayList);
+#define PROFILE_NOTE_DL(_dl) profile_note_display_list(_dl)
 
 void profile_log_init(void);
 void profile_log_frame(void);
@@ -61,6 +83,7 @@ void profile_log_shutdown(void);
 #else
 
 #define PROFILE_ADD(_field, _n) ((void)0)
+#define PROFILE_NOTE_DL(_dl)    ((void)0)
 #define profile_log_init()      ((void)0)
 #define profile_log_frame()     ((void)0)
 #define profile_log_shutdown()  ((void)0)

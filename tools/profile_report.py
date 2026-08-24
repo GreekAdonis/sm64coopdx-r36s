@@ -43,7 +43,8 @@ TIMINGS = [
 
 COUNTERS = ["subframes", "draws", "tris", "verts", "texloads", "texbytes",
             "texflushes", "binds", "bindskips", "impskips", "shaders", "objects",
-            "players", "hookcalls", "hookbhv", "fieldgets", "fieldsets"]
+            "players", "hookcalls", "hookbhv", "fieldgets", "fieldsets",
+            "objsdrawn", "dlnodes", "dldistinct"]
 
 # Why each batch split happened. Absent from older logs; the printer skips
 # whatever a given CSV does not carry.
@@ -161,6 +162,33 @@ def report_frames(meta, rows, top_n):
                        "time is inside mod bytecode; engine-side work will not reach it")
             print(f"  -> us per call    {per:10.2f}   {verdict}")
             print(f"  -> field accesses per call {(gets+sets)/calls:10.1f}")
+
+    # What the geo pass handed the renderer. Absent from older logs.
+    if any("dlnodes" in r for r in rows):
+        n = len(rows)
+        alive = sum(r.get("objects", 0) for r in rows)
+        drawn = sum(r.get("objsdrawn", 0) for r in rows)
+        nodes = sum(r.get("dlnodes", 0) for r in rows)
+        distinct = sum(r.get("dldistinct", 0) for r in rows)
+        print("\ngeo pass output per frame:")
+        print(f"  objects alive     {alive/n:10.1f}")
+        print(f"  objects drawn     {drawn/n:10.1f}", end="")
+        if alive:
+            culled = 100.0 * (1.0 - drawn / alive)
+            print(f"   ({culled:.0f}% culled before the renderer sees them)")
+        else:
+            print()
+        print(f"  display lists     {nodes/n:10.1f}")
+        print(f"  distinct of those {distinct/n:10.1f}", end="")
+        if nodes:
+            share = distinct / nodes
+            verdict = ("instances share display lists; batching by display list has"
+                       " something to collapse" if share < 0.5 else
+                       "display lists are close to per-instance; batching by display"
+                       " list would not help")
+            print(f"   ({share:.2f} per node -- {verdict})")
+        else:
+            print()
 
     print(f"\nworst {top_n} frames by work:")
     worst = sorted(rows, key=busy, reverse=True)[:top_n]

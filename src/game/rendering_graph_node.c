@@ -16,6 +16,7 @@
 #include "pc/lua/smlua_hooks.h"
 #include "pc/utils/misc.h"
 #include "pc/debuglog.h"
+#include "pc/profile_log.h"
 #include "skybox.h"
 #include "first_person_cam.h"
 #include "course_table.h"
@@ -624,6 +625,7 @@ static void geo_append_display_list(void *displayList, s16 layer) {
         listNode->displayList = displayList;
         listNode->next = 0;
         listNode->usingCamSpace = sUsingCamSpace;
+        PROFILE_NOTE_DL(displayList);
         if (gCurGraphNodeMasterList->listHeads[layer] == 0) {
             gCurGraphNodeMasterList->listHeads[layer] = listNode;
         } else {
@@ -1685,6 +1687,7 @@ static void geo_process_object(struct Object *node) {
             dynos_gfx_swap_animations(node);
         }
         if (obj_is_in_view(&node->header.gfx, gMatStack[gMatStackIndex])) {
+            PROFILE_ADD(objsDrawn, 1);
             Mtx *mtx = alloc_display_list(sizeof(*mtx));
             Mtx *mtxPrev = alloc_display_list(sizeof(*mtxPrev));
             if (mtx == NULL || mtxPrev == NULL) { return; }
