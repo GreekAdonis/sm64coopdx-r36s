@@ -36,6 +36,14 @@ struct ProfileCounters {
     u32 luaFieldGets;    // cobject __index
     u32 luaFieldSets;    // cobject __newindex
 
+    // Packet codec traffic. us_netcodec on its own cannot distinguish "we
+    // compress a lot of packets" from "each compression is expensive", and the
+    // two have completely different fixes. Dividing us_netcodec by these gives
+    // the per-call cost directly, which is what says whether the zlib stream
+    // setup or the packet volume is the thing to attack.
+    u32 codecCompressCalls;
+    u32 codecDecompressCalls;
+
     // Which state change forced each batch split, counted only when the vertex
     // buffer actually had geometry to emit. These sum to drawCalls (minus the
     // end-of-frame and HUD-pass flushes) and say where a frame's draw calls
