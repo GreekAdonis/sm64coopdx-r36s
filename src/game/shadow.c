@@ -391,14 +391,16 @@ void get_vertex_coords(s8 index, s8 shadowVertexType, s8 *xCoord, s8 *zCoord) {
 
 /**
  * Populate `xPosVtx`, `yPosVtx`, and `zPosVtx` with the (x, y, z) position of the
- * shadow vertex with the given index. If the shadow is to have 9 vertices,
- * then each of those vertices is clamped down to the floor below it. Otherwise,
- * in the 4 vertex case, the vertex positions are extrapolated from the center
- * of the shadow.
+ * shadow vertex with the given index. Every vertex is extrapolated from the
+ * floor normal/tilt sampled once at the shadow's center (`init_shadow`), rather
+ * than re-querying floor collision per vertex.
  *
- * In practice, due to the if-statement in `make_shadow_vertex()`, the 9
- * vertex and 4 vertex cases are identical, and the above-described clamping
- * behavior is overwritten.
+ * The 9-vertex case used to re-sample the floor under each corner separately,
+ * purely to soften the shadow's alpha near floor-triangle seams (see the
+ * removed diff/solidity computation this fed in `make_shadow_vertex`) — the
+ * position itself was always the extrapolated value below. That was 8 extra
+ * collision queries per shadow for a fidelity nicety; dropped for raw
+ * performance.
  */
 void calculate_vertex_xyz(s8 index, struct Shadow s, f32 *xPosVtx, f32 *yPosVtx, f32 *zPosVtx,
                           s8 shadowVertexType) {
@@ -408,7 +410,6 @@ void calculate_vertex_xyz(s8 index, struct Shadow s, f32 *xPosVtx, f32 *yPosVtx,
     f32 halfTiltedScale;
     s8 xCoordUnit;
     s8 zCoordUnit;
-    struct FloorGeometry *dummy;
 
     // This makes xCoordUnit and yCoordUnit each one of -1, 0, or 1.
     get_vertex_coords(index, shadowVertexType, &xCoordUnit, &zCoordUnit);
@@ -422,45 +423,8 @@ void calculate_vertex_xyz(s8 index, struct Shadow s, f32 *xPosVtx, f32 *yPosVtx,
     if (gShadowAboveWaterOrLava) {
         *yPosVtx = s.floorHeight;
     } else {
-        switch (shadowVertexType) {
-            /**
-             * Note that this dichotomy is later overwritten in
-             * make_shadow_vertex().
-             */
-            case SHADOW_WITH_9_VERTS:
-                // Clamp this vertex's y-position to that of the floor directly
-                // below it, which may differ from the floor below the center
-                // vertex.
-                *yPosVtx = find_floor_height_and_data(*xPosVtx, s.parentY + 1, *zPosVtx, &dummy);
-                break;
-            case SHADOW_WITH_4_VERTS:
-                // Do not clamp. Instead, extrapolate the y-position of this
-                // vertex based on the directly floor below the parent object.
-                *yPosVtx = extrapolate_vertex_y_position(s, *xPosVtx, *zPosVtx);
-                break;
-        }
+        *yPosVtx = extrapolate_vertex_y_position(s, *xPosVtx, *zPosVtx);
     }
-}
-
-/**
- * Given a vertex's location, return the dot product of the
- * position of that vertex (relative to the shadow's center) with the floor
- * normal (at the shadow's center).
- *
- * Since it is a dot product, this returns 0 if these two vectors are
- * perpendicular, meaning the ground is locally flat. It returns nonzero
- * in most cases where `vtxY` is on a different floor triangle from the
- * center vertex, as in the case with SHADOW_WITH_9_VERTS, which sets
- * the y-value from `find_floor_height_and_data`. (See the bottom of
- * `calculate_vertex_xyz`.)
- */
-s16 floor_local_tilt(struct Shadow s, f32 vtxX, f32 vtxY, f32 vtxZ) {
-    f32 relX = vtxX - s.parentX;
-    f32 relY = vtxY - s.floorHeight;
-    f32 relZ = vtxZ - s.parentZ;
-
-    f32 ret = (relX * s.floorNormalX) + (relY * s.floorNormalY) + (relZ * s.floorNormalZ);
-    return ret;
 }
 
 /**
@@ -477,33 +441,6 @@ void make_shadow_vertex(Vtx *vertices, s8 index, struct Shadow s, s8 shadowVerte
 
     calculate_vertex_xyz(index, s, &xPosVtx, &yPosVtx, &zPosVtx, shadowVertexType);
 
-    /**
-     * This is the hack that makes "SHADOW_WITH_9_VERTS" act identically to
-     * "SHADOW_WITH_4_VERTS" in the game; this same hack is disabled by the
-     * GameShark code in this video: https://youtu.be/MSIh4rtNGF0. The code in
-     * the video makes `extrapolate_vertex_y_position` return the same value as
-     * the last-called function that returns a float; in this case, that's
-     * `find_floor_height_and_data`, which this if-statement was designed to
-     * overwrite in the first place. Thus, this if-statement is disabled by that
-     * code.
-     *
-     * The last condition here means the y-position calculated previously
-     * was probably on a different floor triangle from the center vertex.
-     * The gShadowAboveWaterOrLava check is redundant, since `floor_local_tilt`
-     * will always be 0 over water or lava (since they are always flat).
-     */
-    /*if (shadowVertexType == SHADOW_WITH_9_VERTS && !gShadowAboveWaterOrLava
-        && floor_local_tilt(s, xPosVtx, yPosVtx, zPosVtx) != 0) {
-        yPosVtx = extrapolate_vertex_y_position(s, xPosVtx, zPosVtx);
-        solidity = 0;
-    }*/
-    if (shadowVertexType == SHADOW_WITH_9_VERTS) {
-        f32 oldYPosVtx = yPosVtx;
-        yPosVtx = extrapolate_vertex_y_position(s, xPosVtx, zPosVtx);
-        f32 diff = fabs(oldYPosVtx - yPosVtx) / 5.0f;
-        if (diff > 1) { diff = 1; }
-        solidity = 200 * (1.0f - diff);
-    }
     relX = xPosVtx - s.parentX;
     relY = yPosVtx - s.parentY;
     relZ = zPosVtx - s.parentZ;
