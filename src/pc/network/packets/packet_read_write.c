@@ -13,7 +13,13 @@ static u16 sCurrentOrderedGroupId = 0;
 static u16 sCurrentOrderedSeqId = 0;
 
 void packet_init(struct Packet* packet, enum PacketType packetType, bool reliable, enum PacketLevelMatchType levelAreaMustMatch) {
-    memset(packet->buffer, 0, PACKET_LENGTH);
+    // The buffer is deliberately not cleared. Every byte inside
+    // [0, dataLength) is written by packet_write() before anything reads it,
+    // the four hash bytes at [dataLength, dataLength+4) are written by
+    // network_send_to(), and every reader is bounded by dataLength -- so
+    // zeroing 3000 bytes here only ever overwrote data that was about to be
+    // overwritten anyway. It ran once per constructed packet, which is once
+    // per owned sync object per frame.
     packet->packetType = packetType;
     packet->cursor = 0;
     packet->dataLength = 0;

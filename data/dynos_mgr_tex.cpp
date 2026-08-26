@@ -1,10 +1,12 @@
 #include <map>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include "dynos.cpp.h"
 extern "C" {
 #include "pc/gfx/gfx.h"
+#include "pc/gfx/gfx_pc.h"
 #include "pc/gfx/gfx_rendering_api.h"
 #include "pc/mods/mod_fs.h"
 }
@@ -42,6 +44,37 @@ static std::vector<DataNode<TexData> *> &DynosScheduledInvalidTextures() {
 static std::vector<std::pair<std::string, DataNode<TexData> *>> &DynosCustomTexs() {
     static std::vector<std::pair<std::string, DataNode<TexData> *>> sDynosCustomTexs;
     return sDynosCustomTexs;
+}
+
+// Reverse index over DynosCustomTexs(): raw pixel buffer -> the node that owns
+// it. This is the last thing DynOS_Tex_RetrieveNode() consults, and before the
+// index it was a linear walk of every custom texture -- run for every texture
+// pointer that is not overridden, which is most of them, on every import. Run
+// 11 measured DynOS_Tex_RetrieveNode() at 4.14% of all samples, the heaviest
+// function outside the Lua VM and the renderer, in a room with a lot of mods
+// loaded.
+//
+// It cannot be built once up front, which is what the comment inside
+// RetrieveNode used to explain: TexData loads its pixels lazily in
+// DynOS_Tex_Get(), so a node sitting in DynosCustomTexs() can have a NULL raw
+// pointer now and a real one later. An index built at activation would key
+// every PNG-backed texture under NULL and never match the pointer the game
+// actually draws with, which sends a custom texture down import_texture()'s
+// vanilla path where its RGBA32 buffer is read as N64-format data.
+//
+// So build it on demand and drop it whenever something could have moved: the
+// custom set changing (activate/deactivate) or a node's pixels materialising.
+// Rebuilding costs exactly one walk of the list -- what a single lookup used to
+// cost -- and every lookup until the next change is then a hash probe.
+static std::unordered_map<const void *, DataNode<TexData> *> &DynosCustomTexsByRawPtr() {
+    static std::unordered_map<const void *, DataNode<TexData> *> sDynosCustomTexsByRawPtr;
+    return sDynosCustomTexsByRawPtr;
+}
+
+static bool sDynosCustomTexsByRawPtrDirty = true;
+
+static void DynOS_Tex_InvalidateRawPtrIndex() {
+    sDynosCustomTexsByRawPtrDirty = true;
 }
 
 static bool sDynosDumpTextureCache = false;
@@ -281,6 +314,7 @@ void DynOS_Tex_Valid(GfxData* aGfxData) {
     for (auto &_Texture : aGfxData->mTextures) {
         DynosValidTextures().insert(_Texture);
     }
+    gfx_texture_state_invalidate();
 }
 
 void DynOS_Tex_Invalid(GfxData* aGfxData) {
@@ -297,6 +331,7 @@ void DynOS_Tex_Update() {
         DynosValidTextures().erase(_Texture);
     }
     schedule.clear();
+    gfx_texture_state_invalidate();
 }
 
 //
@@ -304,20 +339,27 @@ void DynOS_Tex_Update() {
 //
 
 static DataNode<TexData> *DynOS_Tex_RetrieveNode(void *aPtr) {
+    // These are all lookups, not insertions. std::map::operator[] default-
+    // constructs a NULL entry on a miss, so the previous code grew each map by
+    // one node per distinct vanilla texture pointer ever drawn and then paid a
+    // deeper red-black descent on every subsequent lookup. find() does not.
     {
-        auto _LuaOverrideTexture = DynosOverrideLuaTextures()[(const Texture*)aPtr];
-        if (_LuaOverrideTexture && _LuaOverrideTexture->node) {
-            return _LuaOverrideTexture->node;
+        auto& _LuaOverrideTextures = DynosOverrideLuaTextures();
+        auto _It = _LuaOverrideTextures.find((const Texture*)aPtr);
+        if (_It != _LuaOverrideTextures.end() && _It->second && _It->second->node) {
+            return _It->second->node;
         }
-        auto _LuaOverrideTexData = DynosOverrideLuaTexData()[(DataNode<TexData>*)aPtr];
-        if (_LuaOverrideTexData && _LuaOverrideTexData->node) {
-            return _LuaOverrideTexData->node;
+        auto& _LuaOverrideTexData = DynosOverrideLuaTexData();
+        auto _It2 = _LuaOverrideTexData.find((DataNode<TexData>*)aPtr);
+        if (_It2 != _LuaOverrideTexData.end() && _It2->second && _It2->second->node) {
+            return _It2->second->node;
         }
     }
 
-    auto _Override = DynosOverrideTextures()[(const Texture*)aPtr];
-    if (_Override && _Override->node) {
-        return _Override->node;
+    auto& _OverrideTextures = DynosOverrideTextures();
+    auto _It3 = _OverrideTextures.find((const Texture*)aPtr);
+    if (_It3 != _OverrideTextures.end() && _It3->second && _It3->second->node) {
+        return _It3->second->node;
     }
 
     auto& _ValidTextures = DynosValidTextures();
@@ -325,12 +367,26 @@ static DataNode<TexData> *DynOS_Tex_RetrieveNode(void *aPtr) {
         return (DataNode<TexData>*)aPtr;
     }
 
-    auto& _DynosCustomTexs = DynosCustomTexs();
-    for (auto &_DynosCustomTex : _DynosCustomTexs) {
-        auto& _Node = _DynosCustomTex.second;
-        if (aPtr == (void *) _Node->mData->mRawData.begin()) {
-            return _Node;
+    // Raw pixel buffer -> node, through the on-demand index. See
+    // DynosCustomTexsByRawPtr() for why this cannot be built once up front and
+    // what invalidates it. emplace() keeps the first node inserted for a given
+    // buffer, which is the node the previous linear walk would have returned:
+    // the duplicate path in DynOS_Tex_Load copies mRawData between nodes, so
+    // two entries can share one buffer.
+    auto& _RawPtrIndex = DynosCustomTexsByRawPtr();
+    if (sDynosCustomTexsByRawPtrDirty) {
+        _RawPtrIndex.clear();
+        for (auto &_DynosCustomTex : DynosCustomTexs()) {
+            auto& _Node = _DynosCustomTex.second;
+            const void *_Raw = (const void *) _Node->mData->mRawData.begin();
+            if (_Raw != NULL) { _RawPtrIndex.emplace(_Raw, _Node); }
         }
+        sDynosCustomTexsByRawPtrDirty = false;
+    }
+
+    auto _It4 = _RawPtrIndex.find((const void *) aPtr);
+    if (_It4 != _RawPtrIndex.end()) {
+        return _It4->second;
     }
 
     return NULL;
@@ -396,6 +452,11 @@ void DynOS_Tex_Activate(DataNode<TexData>* aNode, bool aCustomTexture) {
 
     // Add to valid
     DynosValidTextures().insert(aNode);
+
+    // A texture pointer now resolves somewhere else; the renderer caches that
+    // resolution across frames, so tell it to redo it.
+    DynOS_Tex_InvalidateRawPtrIndex();
+    gfx_texture_state_invalidate();
 }
 
 void DynOS_Tex_Deactivate(DataNode<TexData>* aNode) {
@@ -411,6 +472,8 @@ void DynOS_Tex_Deactivate(DataNode<TexData>* aNode) {
             ++i;
         }
     }
+    DynOS_Tex_InvalidateRawPtrIndex();
+    gfx_texture_state_invalidate();
 
     // un-override texture
     const Texture* _BuiltinTex = DynOS_Builtin_Tex_GetFromName(aNode->mName.begin());
@@ -476,6 +539,10 @@ bool DynOS_Tex_Get(const char* aTexName, struct TextureInfo* aOutTexInfo) {
                 _Data->mRawSize   = G_IM_SIZ_32b;
                 _Data->mRawData   = Array<u8>(_RawData, _RawData + (_Data->mRawWidth * _Data->mRawHeight * 4));
                 free(_RawData);
+
+                // This node's raw pointer just went from NULL to real, which is
+                // the one mutation the raw-pointer index cannot see coming.
+                DynOS_Tex_InvalidateRawPtrIndex();
             }
 
             CONVERT_TEXINFO(aTexName);
@@ -576,6 +643,7 @@ void DynOS_Tex_Override_Set(const char* aTexName, struct TextureInfo* aOverrideT
         auto& _DynosOverrideLuaTexData = DynosOverrideLuaTexData();
         _DynosOverrideLuaTexData[_BuiltinTexData] = _Override;
     }
+    gfx_texture_state_invalidate();
 }
 
 void DynOS_Tex_Override_Reset(const char* aTexName) {
@@ -600,11 +668,13 @@ void DynOS_Tex_Override_Reset(const char* aTexName) {
             _DynosOverrideLuaTexData.erase(_BuiltinTexData);
         }
     }
+    gfx_texture_state_invalidate();
 }
 
 void DynOS_Tex_ModShutdown() {
     auto& _DynosOverrideLuaTextures = DynosOverrideLuaTextures();
     _DynosOverrideLuaTextures.clear();
+    gfx_texture_state_invalidate();
 
     auto& _DynosCustomTexs = DynosCustomTexs();
     while (!_DynosCustomTexs.empty()) {

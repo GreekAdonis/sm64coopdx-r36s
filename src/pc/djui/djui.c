@@ -12,6 +12,8 @@
 #include "djui_lua_profiler.h"
 #include "../debuglog.h"
 #include "pc/cliopts.h"
+#include "pc/configfile.h"
+#include "pc/pc_main.h"
 #include "game/level_update.h"
 #include "pc/lua/smlua_hooks.h"
 #include "djui_panel_playerlist.h"
@@ -204,9 +206,25 @@ void djui_render(void) {
         djui_base_render(&sDjuiRootBehind->base);
     }
 
+    // A dropped render throws this display list away, so the hook would be
+    // drawing for a frame nobody sees. Run 11 measured HOOK_ON_HUD_RENDER at
+    // 1,164us per call and roughly 13 calls per frame -- 6.7ms of every
+    // iteration, dropped or not, because render_game() and this run inside the
+    // game loop rather than the render step.
+    //
+    // Left behind the config key because it is not purely free: a mod that uses
+    // HOOK_ON_HUD_RENDER for something other than drawing -- a timer, a state
+    // machine -- would tick at the displayed rate instead of the simulation
+    // rate. Nothing visual changes either way; a dropped frame never reaches the
+    // screen at all, it just leaves the previous one there.
+    //
     // To maintain consistency with other hooks, HOOK_ON_HUD_RENDER must run at 30 fps
     // During interpolated frames, copy the generated display list without running the hook again
-    if (!sDjuiRendered60fps) {
+    if (gSkipSceneGraph && configRenderSkipHud) {
+        // Deliberately leaves sHookHudRenderGfx alone: it is only read when
+        // sDjuiRendered60fps is set, which cannot happen on an iteration whose
+        // render was dropped, and the next drawn frame regenerates it.
+    } else if (!sDjuiRendered60fps) {
         Gfx *hookHudRenderStart = gDisplayListHead;
         smlua_call_event_hooks(HOOK_ON_HUD_RENDER, djui_reset_hud_params);
         size_t gfxSize = sizeof(Gfx) * (gDisplayListHead - hookHudRenderStart);

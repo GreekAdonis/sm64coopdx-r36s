@@ -90,6 +90,11 @@ extern int gSmLuaCPointers;
 extern int gSmLuaCObjectMetatable;
 extern int gSmLuaCPointerMetatable;
 
+// Registry reference to the gMarioStates table, so the hook dispatchers can
+// reach it without a lua_getglobal() per callback invocation. See
+// smlua_cobject_init_globals() and autogen/gen_hooks.py.
+extern int gSmLuaMarioStatesRef;
+
 bool smlua_valid_lot(u16 lot);
 bool smlua_valid_lvt(u16 lvt);
 const char *smlua_get_lvt_name(u16 lvt);

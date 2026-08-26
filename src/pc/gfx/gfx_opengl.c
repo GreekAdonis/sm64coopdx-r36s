@@ -54,6 +54,26 @@ struct ShaderProgram {
     // when the player changes a setting, but the uniform was being re-sent on
     // every single shader switch.
     int uploaded_filtering;
+
+    // The same idea applied to the rest of the per-program uniforms. A shader
+    // switch used to re-upload all of them unconditionally, including two
+    // SHADER_FLAG_MAX-element arrays, and there are ~45 switches a frame going
+    // into a driver that is already a quarter of the main thread.
+    //
+    // These are compared by value rather than driven by a dirty flag on the
+    // globals, so no writer anywhere has to cooperate to keep them correct.
+    // Each array is 8 elements; a memcmp of 32 bytes is far cheaper than the
+    // glUniform*v call it avoids.
+    uint32_t uploaded_noise_frame;   // frame_count at the last noise upload
+    bool     uploaded_noise_valid;
+    bool     uploaded_lightmap_valid;
+    uint8_t  uploaded_lightmap[3];
+    bool     uploaded_flags_valid;
+    int      uploaded_flags[SHADER_FLAG_MAX];
+    f32      uploaded_flag_values[SHADER_FLAG_MAX];
+    bool     uploaded_tex_valid[2];
+    GLfloat  uploaded_tex_size[2][2];
+    int      uploaded_tex_filter[2];
 };
 
 struct GLTexture {
@@ -273,6 +293,9 @@ static void gfx_opengl_handheld_ensure_fbo(uint32_t window_w, uint32_t window_h)
     // select_texture() trusting a unit that's actually unbound now.
     opengl_tex[0] = NULL;
     opengl_tex[1] = NULL;
+    // gfx_pc.c skips imports it can prove are no-ops, which means it will not
+    // re-issue select_texture() on its own. Tell it the binding is gone.
+    gfx_texture_state_invalidate();
 
     if (status != GL_FRAMEBUFFER_COMPLETE) {
         fprintf(stderr, "handheld internal-resolution FBO incomplete (0x%x); rendering at native resolution\n", status);
@@ -292,23 +315,110 @@ static bool gfx_opengl_z_is_from_0_to_1(void) {
     return false;
 }
 
+  ////////////////////////////////
+ // vertex attribute array state //
+////////////////////////////////
+
+// A shader switch used to disable every attribute array of the outgoing
+// program and then enable every array of the incoming one, plus re-specify a
+// pointer for each. The programs in this renderer share a vertex layout family,
+// so most of those calls set the state to what it already was -- and there are
+// ~45 switches a frame.
+//
+// Mirror the state instead and issue only the difference. Attribute pointer
+// state is per attribute index and survives the glBufferData re-upload in
+// draw_triangles, so a pointer only has to be re-sent when the layout for that
+// index actually changes.
+#define GFX_MAX_ATTRIB_INDEX 32
+
+struct GLAttribLayout {
+    bool valid;
+    uint8_t size;
+    uint8_t num_floats;
+    uint8_t offset;
+};
+
+static uint32_t sEnabledAttribs = 0;
+static struct GLAttribLayout sAttribLayout[GFX_MAX_ATTRIB_INDEX];
+
+// Call after driving the attribute arrays outside this bookkeeping, so the
+// mirror stops claiming state GL no longer has.
+static void gfx_opengl_attrib_state_invalidate(GLint loc) {
+    if (loc < 0 || loc >= GFX_MAX_ATTRIB_INDEX) { return; }
+    sEnabledAttribs &= ~(1u << loc);
+    sAttribLayout[loc].valid = false;
+}
+
 static void gfx_opengl_vertex_array_set_attribs(struct ShaderProgram *prg) {
     size_t num_floats = prg->num_floats;
     size_t pos = 0;
+    uint32_t want = 0;
 
     for (int i = 0; i < prg->num_attribs; i++) {
-        glEnableVertexAttribArray(prg->attrib_locations[i]);
-        glVertexAttribPointer(prg->attrib_locations[i], prg->attrib_sizes[i], GL_FLOAT, GL_FALSE, num_floats * sizeof(float), (void *) (pos * sizeof(float)));
+        GLint loc = prg->attrib_locations[i];
+        // A location of -1 means the compiler dropped the attribute; passing it
+        // to glEnableVertexAttribArray only ever raised a GL error.
+        if (loc >= 0 && loc < GFX_MAX_ATTRIB_INDEX) {
+            want |= 1u << loc;
+
+            struct GLAttribLayout *have = &sAttribLayout[loc];
+            if (!have->valid
+                || have->size != prg->attrib_sizes[i]
+                || have->num_floats != num_floats
+                || have->offset != pos) {
+                glVertexAttribPointer(loc, prg->attrib_sizes[i], GL_FLOAT, GL_FALSE,
+                                      num_floats * sizeof(float), (void *) (pos * sizeof(float)));
+                have->valid      = true;
+                have->size       = (uint8_t) prg->attrib_sizes[i];
+                have->num_floats = (uint8_t) num_floats;
+                have->offset     = (uint8_t) pos;
+            }
+        }
         pos += prg->attrib_sizes[i];
     }
+
+    for (uint32_t d = want & ~sEnabledAttribs; d != 0; d &= d - 1) {
+        glEnableVertexAttribArray((GLuint) __builtin_ctz(d));
+    }
+    for (uint32_t d = sEnabledAttribs & ~want; d != 0; d &= d - 1) {
+        glDisableVertexAttribArray((GLuint) __builtin_ctz(d));
+    }
+    sEnabledAttribs = want;
 }
 
 static inline void gfx_opengl_set_shader_uniforms(struct ShaderProgram *prg) {
-    if (prg->used_noise) { glUniform1f(prg->uniform_locations[4], (float)frame_count); }
-    if (prg->used_lightmap) { glUniform3f(prg->uniform_locations[5], gVertexColor[0] / 255.0f, gVertexColor[1] / 255.0f, gVertexColor[2] / 255.0f); }
+    // The noise seed is the frame counter, so it changes once a frame no matter
+    // how many times the program is bound within it.
+    if (prg->used_noise && (!prg->uploaded_noise_valid || prg->uploaded_noise_frame != frame_count)) {
+        glUniform1f(prg->uniform_locations[4], (float)frame_count);
+        prg->uploaded_noise_valid = true;
+        prg->uploaded_noise_frame = frame_count;
+    }
+    if (prg->used_lightmap
+        && (!prg->uploaded_lightmap_valid
+            || prg->uploaded_lightmap[0] != gVertexColor[0]
+            || prg->uploaded_lightmap[1] != gVertexColor[1]
+            || prg->uploaded_lightmap[2] != gVertexColor[2])) {
+        glUniform3f(prg->uniform_locations[5], gVertexColor[0] / 255.0f, gVertexColor[1] / 255.0f, gVertexColor[2] / 255.0f);
+        prg->uploaded_lightmap_valid = true;
+        prg->uploaded_lightmap[0] = gVertexColor[0];
+        prg->uploaded_lightmap[1] = gVertexColor[1];
+        prg->uploaded_lightmap[2] = gVertexColor[2];
+    }
     if (prg->world_geometry) {
-        glUniform1iv(prg->uniform_locations[6], SHADER_FLAG_MAX, gShaderFlags);
-        glUniform1fv(prg->uniform_locations[7], SHADER_FLAG_MAX, gShaderFlagValues);
+        // Two array uploads that only change when a mod changes a shader flag,
+        // which is essentially never, against ~45 shader binds a frame.
+        if (!prg->uploaded_flags_valid
+            || memcmp(prg->uploaded_flags, gShaderFlags, sizeof(prg->uploaded_flags)) != 0) {
+            glUniform1iv(prg->uniform_locations[6], SHADER_FLAG_MAX, gShaderFlags);
+            memcpy(prg->uploaded_flags, gShaderFlags, sizeof(prg->uploaded_flags));
+        }
+        if (!prg->uploaded_flags_valid
+            || memcmp(prg->uploaded_flag_values, gShaderFlagValues, sizeof(prg->uploaded_flag_values)) != 0) {
+            glUniform1fv(prg->uniform_locations[7], SHADER_FLAG_MAX, gShaderFlagValues);
+            memcpy(prg->uploaded_flag_values, gShaderFlagValues, sizeof(prg->uploaded_flag_values));
+        }
+        prg->uploaded_flags_valid = true;
     }
 
     if (prg->uploaded_filtering != (int) configFiltering) {
@@ -319,15 +429,29 @@ static inline void gfx_opengl_set_shader_uniforms(struct ShaderProgram *prg) {
 
 static inline void gfx_opengl_set_texture_uniforms(struct ShaderProgram *prg, const int tile) {
     if (prg->used_textures[tile] && opengl_tex[tile]) {
-        glUniform2f(prg->uniform_locations[tile*2 + 0], opengl_tex[tile]->size[0], opengl_tex[tile]->size[1]);
-        glUniform1i(prg->uniform_locations[tile*2 + 1], opengl_tex[tile]->filter);
+        if (!prg->uploaded_tex_valid[tile]
+            || prg->uploaded_tex_size[tile][0] != opengl_tex[tile]->size[0]
+            || prg->uploaded_tex_size[tile][1] != opengl_tex[tile]->size[1]) {
+            glUniform2f(prg->uniform_locations[tile*2 + 0], opengl_tex[tile]->size[0], opengl_tex[tile]->size[1]);
+            prg->uploaded_tex_size[tile][0] = opengl_tex[tile]->size[0];
+            prg->uploaded_tex_size[tile][1] = opengl_tex[tile]->size[1];
+        }
+        if (!prg->uploaded_tex_valid[tile]
+            || prg->uploaded_tex_filter[tile] != (int) opengl_tex[tile]->filter) {
+            glUniform1i(prg->uniform_locations[tile*2 + 1], opengl_tex[tile]->filter);
+            prg->uploaded_tex_filter[tile] = (int) opengl_tex[tile]->filter;
+        }
+        prg->uploaded_tex_valid[tile] = true;
     }
 }
 
 static void gfx_opengl_unload_shader(struct ShaderProgram *old_prg) {
+    // No longer disables the outgoing program's attribute arrays. Every
+    // unload here is immediately followed by a load, and
+    // gfx_opengl_vertex_array_set_attribs() issues the enable/disable
+    // difference against what is actually on -- so disabling them first only
+    // guaranteed the next load would have to turn most of them back on.
     if (old_prg != NULL) {
-        for (int i = 0; i < old_prg->num_attribs; i++)
-            glDisableVertexAttribArray(old_prg->attrib_locations[i]);
         if (old_prg == opengl_prg)
             opengl_prg = NULL;
     } else {
@@ -859,9 +983,16 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorC
     prg->used_textures[1] = ccf.used_textures[1];
     prg->num_floats = num_floats;
     prg->num_attribs = cnt;
-    // Slots in this pool are recycled, so this has to be reset per program
-    // rather than relying on zero-initialization.
+    // Slots in this pool are recycled, so these have to be reset per program
+    // rather than relying on zero-initialization. A recycled slot that still
+    // claimed its uniforms were uploaded would leave the new program running
+    // with whatever the previous occupant last sent.
     prg->uploaded_filtering = -1;
+    prg->uploaded_noise_valid = false;
+    prg->uploaded_lightmap_valid = false;
+    prg->uploaded_flags_valid = false;
+    prg->uploaded_tex_valid[0] = false;
+    prg->uploaded_tex_valid[1] = false;
 
     glUseProgram(shader_program);
     for (int t = 0; t < 2; t++) {
@@ -929,6 +1060,7 @@ static GLuint gfx_opengl_new_texture(void) {
         // invalidate these because they might be pointing to garbage now
         opengl_tex[0] = NULL;
         opengl_tex[1] = NULL;
+        gfx_texture_state_invalidate();
     }
     glGenTextures(1, &tex_cache[num_textures].gltex);
     return num_textures++;
@@ -1120,6 +1252,12 @@ static void gfx_opengl_init(void) {
         sys_fatal("OpenGL 2.1+ is required.\nReported version: %s%d.%d", is_es ? "ES" : "", vmajor, vminor);
     }
 
+    // A fresh context has every attribute array disabled and no pointer state,
+    // so the mirror has to start from that and not from whatever a previous
+    // context left behind.
+    sEnabledAttribs = 0;
+    memset(sAttribLayout, 0, sizeof(sAttribLayout));
+
     glGenBuffers(1, &opengl_vbo);
 
     glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);
@@ -1227,6 +1365,7 @@ void gfx_opengl_handheld_end_world_pass(void) {
     // thinks is bound to unit 0 is now wrong -- force the next select_texture(0, ...)
     // to actually rebind instead of trusting its (now stale) cache.
     opengl_tex[0] = NULL;
+    gfx_texture_state_invalidate();
 
     static const float kBlitQuad[8] = { -1.0f, -1.0f,  1.0f, -1.0f,  -1.0f, 1.0f,  1.0f, 1.0f };
     glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);
@@ -1235,6 +1374,10 @@ void gfx_opengl_handheld_end_world_pass(void) {
     glVertexAttribPointer(sHandheldBlitPosLoc, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void *) 0);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glDisableVertexAttribArray(sHandheldBlitPosLoc);
+    // The blit drives the attribute arrays directly, so the mirror is now stale
+    // for this index: the array is off, and its pointer describes the blit quad
+    // rather than whatever the renderer last set.
+    gfx_opengl_attrib_state_invalidate(sHandheldBlitPosLoc);
 
     if (opengl_prg) {
         glUseProgram(opengl_prg->opengl_program_id);

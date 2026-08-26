@@ -39,9 +39,8 @@ bool smlua_call_event_hooks_HOOK_MARIO_UPDATE(struct MarioState *m) {
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // call the callback
@@ -69,9 +68,8 @@ bool smlua_call_event_hooks_HOOK_BEFORE_MARIO_UPDATE(struct MarioState *m) {
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // call the callback
@@ -99,9 +97,8 @@ bool smlua_call_event_hooks_HOOK_ON_SET_MARIO_ACTION(struct MarioState *m) {
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // call the callback
@@ -128,9 +125,8 @@ bool smlua_call_event_hooks_HOOK_BEFORE_PHYS_STEP(struct MarioState *m, s32 step
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // push stepType
@@ -170,15 +166,13 @@ bool smlua_call_event_hooks_HOOK_ALLOW_PVP_ATTACK(struct MarioState *attacker, s
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push attacker
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, attacker->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, attacker->playerIndex);
         lua_remove(L, -2);
 
         // push victim
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, victim->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, victim->playerIndex);
         lua_remove(L, -2);
 
         // push interaction
@@ -214,15 +208,13 @@ bool smlua_call_event_hooks_HOOK_ON_PVP_ATTACK(struct MarioState *attacker, stru
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push attacker
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, attacker->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, attacker->playerIndex);
         lua_remove(L, -2);
 
         // push victim
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, victim->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, victim->playerIndex);
         lua_remove(L, -2);
 
         // push interaction
@@ -253,9 +245,8 @@ bool smlua_call_event_hooks_HOOK_ON_PLAYER_CONNECTED(struct MarioState *m) {
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // call the callback
@@ -283,9 +274,8 @@ bool smlua_call_event_hooks_HOOK_ON_PLAYER_DISCONNECTED(struct MarioState *m) {
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // call the callback
@@ -313,9 +303,8 @@ bool smlua_call_event_hooks_HOOK_ALLOW_INTERACT(struct MarioState *m, struct Obj
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // push obj
@@ -354,9 +343,8 @@ bool smlua_call_event_hooks_HOOK_ON_INTERACT(struct MarioState *m, struct Object
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // push obj
@@ -674,9 +662,8 @@ bool smlua_call_event_hooks_HOOK_ON_DEATH(struct MarioState *m, bool *allowDeath
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // call the callback
@@ -833,9 +820,8 @@ bool smlua_call_event_hooks_HOOK_ALLOW_HAZARD_SURFACE(struct MarioState *m, s32 
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // push hazardType
@@ -871,9 +857,8 @@ bool smlua_call_event_hooks_HOOK_ON_CHAT_MESSAGE(struct MarioState *m, const cha
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // push message
@@ -941,9 +926,8 @@ bool smlua_call_event_hooks_HOOK_CHARACTER_SOUND(struct MarioState *m, enum Char
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // push characterSound
@@ -980,9 +964,8 @@ bool smlua_call_event_hooks_HOOK_BEFORE_SET_MARIO_ACTION(struct MarioState *m, u
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // push action
@@ -1165,9 +1148,8 @@ bool smlua_call_event_hooks_HOOK_ON_COLLIDE_LEVEL_BOUNDS(struct MarioState *m) {
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // call the callback
@@ -1224,9 +1206,8 @@ bool smlua_call_event_hooks_HOOK_MARIO_OVERRIDE_PHYS_STEP_DEFACTO_SPEED(struct M
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // call the callback
@@ -1360,9 +1341,8 @@ bool smlua_call_event_hooks_HOOK_ON_ATTACK_OBJECT(struct MarioState *m, struct O
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // push obj
@@ -1561,9 +1541,8 @@ bool smlua_call_event_hooks_HOOK_MARIO_OVERRIDE_GEOMETRY_INPUTS(struct MarioStat
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // call the callback
@@ -1596,9 +1575,8 @@ bool smlua_call_event_hooks_HOOK_ON_INTERACTIONS(struct MarioState *m) {
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // call the callback
@@ -1626,9 +1604,8 @@ bool smlua_call_event_hooks_HOOK_ALLOW_FORCE_WATER_ACTION(struct MarioState *m, 
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // push isInWaterAction
@@ -1756,9 +1733,8 @@ bool smlua_call_event_hooks_HOOK_MARIO_OVERRIDE_FLOOR_CLASS(struct MarioState *m
         lua_rawgeti(L, LUA_REGISTRYINDEX, hook->reference[i]);
 
         // push m
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, m->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, m->playerIndex);
         lua_remove(L, -2);
 
         // push floorClass

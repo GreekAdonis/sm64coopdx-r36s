@@ -27,6 +27,8 @@
 #include "pc/lua/smlua.h"
 #include "pc/djui/djui_hud_utils.h"
 #include "pc/debug_context.h"
+#include "pc/configfile.h"
+#include "pc/network/network_player.h"
 
 /**
  * Flags controlling what debug info is displayed.
@@ -269,10 +271,30 @@ void bhv_mario_update(void) {
 
     gMarioState->visibleToObjects = true;
 
-    smlua_call_event_hooks(HOOK_BEFORE_MARIO_UPDATE, gMarioState);
+    // A Mario object exists for every one of the MAX_PLAYERS slots, connected or
+    // not: level_script.c chains a SpawnInfo for all 16 and spawn_objects_from_info()
+    // walks the chain with no filter. So this behaviour runs 16 times a frame in
+    // every session, and the two hooks below fan out across every mod for each of
+    // those 16 -- including the slots nobody is playing.
+    //
+    // Run 11 measured 720 HOOK_MARIO_UPDATE calls per frame against 16 slots,
+    // about 45 registered callbacks, and hook volume that rose by only ~23 when a
+    // sixth player joined -- because joining does not create a Mario object, it
+    // fills one that was already being updated. With 6 players connected, 10 of
+    // the 16 fan-outs were for empty slots: roughly 12ms of a 44ms tick.
+    //
+    // Slot 0 is always the local player and always runs. The rest run only when
+    // someone is actually there. Behind a config key because a mod that sets up
+    // per-player state on first update, rather than on connect, would now see
+    // that update arrive later.
+    const bool runPlayerHooks = (stateIndex == 0)
+                             || !configLuaSkipUnconnectedPlayers
+                             || gNetworkPlayers[stateIndex].connected;
+
+    if (runPlayerHooks) { smlua_call_event_hooks(HOOK_BEFORE_MARIO_UPDATE, gMarioState); }
 
     u32 particleFlags = execute_mario_action(gCurrentObject);
-    smlua_call_event_hooks(HOOK_MARIO_UPDATE, gMarioState);
+    if (runPlayerHooks) { smlua_call_event_hooks(HOOK_MARIO_UPDATE, gMarioState); }
     particleFlags |= gMarioState->particleFlags;
     gCurrentObject->oMarioParticleFlags = particleFlags;
 

@@ -10,6 +10,7 @@
 #include "game/scroll_targets.h"
 #include "game/rendering_graph_node.h"
 #include "audio/external.h"
+#include "pc/profile_log.h"
 #include "object_fields.h"
 #include "pc/djui/djui_hud_utils.h"
 #include "pc/lua/smlua.h"
@@ -24,6 +25,7 @@ int gSmLuaCObjects = 0;
 int gSmLuaCPointers = 0;
 int gSmLuaCObjectMetatable = 0;
 int gSmLuaCPointerMetatable = 0;
+int gSmLuaMarioStatesRef = LUA_NOREF;
 
   ////////////////////////
  // field lookup index //
@@ -572,6 +574,7 @@ static bool smlua_set_field(lua_State* L, u8* p, struct LuaObjectField *data) {
 }
 
 static int smlua__get_field(lua_State* L) {
+    PROFILE_ADD(luaFieldGets, 1);
     LUA_STACK_CHECK_BEGIN_NUM(L, 1);
 
     const CObject *cobj = lua_touserdata(L, 1);
@@ -691,6 +694,7 @@ static int smlua__get_field(lua_State* L) {
 }
 
 static int smlua__set_field(lua_State* L) {
+    PROFILE_ADD(luaFieldSets, 1);
     LUA_STACK_CHECK_BEGIN(L);
 
     const CObject *cobj = lua_touserdata(L, 1);
@@ -912,6 +916,19 @@ void smlua_cobject_init_globals(void) {
     // Array structs
 
     EXPOSE_GLOBAL_ARRAY(LOT_MARIOSTATE, gMarioStates, MAX_PLAYERS);
+
+    // Keep a registry reference to that table. Every hook that takes a
+    // MarioState resolved it with lua_getglobal(L, "gMarioStates") once per
+    // registered callback -- a string hash into _G, inside the dispatch loop.
+    // Run 11 measured about 725 such invocations per frame across
+    // HOOK_MARIO_UPDATE and friends, in a room with ~98 callbacks registered on
+    // HOOK_MARIO_UPDATE alone. A registry slot is an array index instead.
+    //
+    // The reference is to the table, not to its entries, so a mod reassigning
+    // gMarioStates[i] is still seen. It is retaken here on every Lua state
+    // rebuild, alongside the other refs above.
+    lua_getglobal(L, "gMarioStates");
+    gSmLuaMarioStatesRef = luaL_ref(L, LUA_REGISTRYINDEX);
 
     EXPOSE_GLOBAL_ARRAY(LOT_NETWORKPLAYER, gNetworkPlayers, MAX_PLAYERS);
 

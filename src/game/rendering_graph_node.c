@@ -16,6 +16,7 @@
 #include "pc/lua/smlua_hooks.h"
 #include "pc/utils/misc.h"
 #include "pc/debuglog.h"
+#include "pc/profile_log.h"
 #include "skybox.h"
 #include "first_person_cam.h"
 #include "course_table.h"
@@ -368,6 +369,22 @@ void patch_mtx_interpolated(f32 delta) {
     }
     gCurGraphNodeObject = savedObj;
 
+    // A delta of 1.0 means "show the current game state": lerp(prev, cur, 1.0)
+    // is cur, in whatever space it is expressed. That is not a rare corner --
+    // it is what every frame that overran its budget looks like, because
+    // produce_interpolation_frames_and_delay() then draws exactly one sub-frame
+    // and clamps delta to 1.0. On a crowded scene that is most frames, and this
+    // loop runs once per display list node, so it is worth not doing the work
+    // twice over.
+    //
+    // The saving is real rather than cosmetic: delta_interpolate_mtx()'s
+    // accurate path decomposes both matrices, slerps a quaternion and
+    // recomposes, only to arrive back at its second argument. Its bit-identical
+    // memcmp shortcut does not rescue us here either -- a moving camera rewrites
+    // every camera-space matrix each frame, including those of objects that
+    // never moved.
+    const bool noInterp = (delta >= 1.0f);
+
     // calculate outside of for loop to reduce overhead
     // technically this is improper use of mtxf functions, but coop doesn't target N64
     Mtx camTranfInv, prevCamTranfInv;
@@ -376,7 +393,13 @@ void patch_mtx_interpolated(f32 delta) {
     if (translateCamSpace) {
         // compute inverse camera matrix to transform out of camera space later
         mtxf_inverse(camTranfInv.m, *sCameraNode->matrixPtr);
-        mtxf_inverse(prevCamTranfInv.m, *sCameraNode->matrixPtrPrev);
+
+        // The previous frame's inverse exists only to carry the previous matrix
+        // into world space for the lerp below. With no lerp to do, nothing reads
+        // it.
+        if (!noInterp) {
+            mtxf_inverse(prevCamTranfInv.m, *sCameraNode->matrixPtrPrev);
+        }
 
         // use camera node's stored information to calculate interpolated camera transform
         Vec3f posInterp, focusInterp;
@@ -392,17 +415,42 @@ void patch_mtx_interpolated(f32 delta) {
         Mtx *srcMtx = interp->mtx;
         Mtx *srcMtxPrev = interp->mtxPrev;
 
+        // Scratch for the camera-space round trip. Declared out here because
+        // srcMtx/srcMtxPrev are read after the block that fills them, and a
+        // buffer scoped to that block would be dead by then.
+        Mtx bufMtx, bufMtxPrev;
+
+        if (noInterp && !interp->usingCamSpace) {
+            // interp->interp would end up a byte-for-byte copy of *srcMtx, and
+            // nothing else reads it. Point the display list straight at the
+            // matrix we already have.
+            gSPMatrix(pos++, VIRTUAL_TO_PHYSICAL(srcMtx),
+                      G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
+            continue;
+        }
+
         if (interp->usingCamSpace && translateCamSpace) {
             // transform out of camera space so the matrix can interp in world space
-            Mtx bufMtx, bufMtxPrev;
             mtxf_copy(bufMtx.m, srcMtx->m);
-            mtxf_copy(bufMtxPrev.m, srcMtxPrev->m);
             mtxf_mul(bufMtx.m, bufMtx.m, camTranfInv.m);
-            mtxf_mul(bufMtxPrev.m, bufMtxPrev.m, prevCamTranfInv.m);
             srcMtx = &bufMtx;
-            srcMtxPrev = &bufMtxPrev;
+
+            if (!noInterp) {
+                mtxf_copy(bufMtxPrev.m, srcMtxPrev->m);
+                mtxf_mul(bufMtxPrev.m, bufMtxPrev.m, prevCamTranfInv.m);
+                srcMtxPrev = &bufMtxPrev;
+            }
         }
-        delta_interpolate_mtx(&interp->interp, srcMtxPrev, srcMtx, delta);
+        if (noInterp) {
+            // Exactly what delta_interpolate_mtx() would store, without the
+            // decompose/slerp/recompose round trip to get there. The camera-space
+            // conversion above and the one below are deliberately kept: they are
+            // not a no-op pair unless the camera node sits on an identity parent
+            // matrix, and that is not worth assuming here.
+            interp->interp = *srcMtx;
+        } else {
+            delta_interpolate_mtx(&interp->interp, srcMtxPrev, srcMtx, delta);
+        }
         if (interp->usingCamSpace) {
             // transform back to camera space, respecting camera interpolation
             mtxf_mul(interp->interp.m, interp->interp.m, camInterp.m);
@@ -564,19 +612,41 @@ static void geo_process_master_list_sub(struct GraphNodeMasterList *node) {
  * parameter. Look at the RenderModeContainer struct to see the corresponding
  * render modes of layers.
  */
+// The per-object state reset, armed by geo_sanitize_object_gfx() and emitted
+// into a layer only when that object actually puts geometry there. NULL means
+// nothing is armed. See geo_sanitize_object_gfx() for why this is lazy.
+static void *sPendingSanitizeDl = NULL;
+static u32   sPendingSanitizeLayers = 0;
+
 static void geo_append_display_list(void *displayList, s16 layer) {
 
 #ifdef F3DEX_GBI_2
     gSPLookAt(gDisplayListHead++, &lookAt);
 #endif
     if (gCurGraphNodeMasterList != 0) {
+        // First real geometry this object puts in this layer: the state reset has
+        // to land immediately in front of it. The recursive call terminates
+        // because its display list is the pending one.
+        if (sPendingSanitizeDl != NULL && displayList != sPendingSanitizeDl
+            && layer >= 0 && layer < GFX_NUM_MASTER_LISTS
+            && !(sPendingSanitizeLayers & (1u << layer))) {
+            sPendingSanitizeLayers |= (1u << layer);
+            geo_append_display_list(sPendingSanitizeDl, layer);
+        }
+
         struct DisplayListNode *listNode = growing_pool_alloc(gDisplayListHeap, sizeof(struct DisplayListNode));
+        // growing_pool_alloc() returns NULL when its malloc fails, which this
+        // call site dereferenced unchecked -- print.c guards the same call.
+        // Dropping one display list loses a model for a frame; the alternative
+        // here is a segfault.
+        if (listNode == NULL) { return; }
 
         listNode->transform = gMatStackFixed[gMatStackIndex];
         listNode->transformPrev = gMatStackPrevFixed[gMatStackIndex];
         listNode->displayList = displayList;
         listNode->next = 0;
         listNode->usingCamSpace = sUsingCamSpace;
+        PROFILE_NOTE_DL(displayList);
         if (gCurGraphNodeMasterList->listHeads[layer] == 0) {
             gCurGraphNodeMasterList->listHeads[layer] = listNode;
         } else {
@@ -605,8 +675,14 @@ static void geo_process_master_list(struct GraphNodeMasterList *node) {
         for (s32 i = 0; i < GFX_NUM_MASTER_LISTS; i++) {
             node->listHeads[i] = NULL;
         }
+        // Nothing is armed across a master list boundary: an object's reset is
+        // only ever meaningful inside the pass that drew the object.
+        sPendingSanitizeDl = NULL;
+        sPendingSanitizeLayers = 0;
         geo_process_node_and_siblings(node->node.children);
         geo_process_master_list_sub(node);
+        sPendingSanitizeDl = NULL;
+        sPendingSanitizeLayers = 0;
         gCurGraphNodeMasterList = NULL;
     }
 }
@@ -1445,14 +1521,16 @@ static s32 obj_is_in_view(struct GraphNodeObject *node, Mat4 matrix) {
 
     f32 divisor = coss(halfFov);
     if (divisor == 0) { divisor = 1; }
-    f32 hScreenEdge = -matrix[3][2] * sins(halfFov) / divisor;
     // -matrix[3][2] is the depth, which gets multiplied by tan(halfFov) to get
-    // the amount of units between the center of the screen and the horizontal edge
-    // given the distance from the object to the camera.
+    // the amount of units between the center of the screen and the vertical edge
+    // given the distance from the object to the camera. The projection is built
+    // from a vertical fov, so this is the vertical half-extent directly and the
+    // horizontal one is it scaled by the aspect ratio.
+    f32 vScreenEdge = -matrix[3][2] * sins(halfFov) / divisor;
 
     // This multiplication should really be performed on 4:3 as well,
     // but the issue will be more apparent on widescreen.
-    hScreenEdge *= GFX_DIMENSIONS_ASPECT_RATIO;
+    f32 hScreenEdge = vScreenEdge * GFX_DIMENSIONS_ASPECT_RATIO;
 
     s16 cullingRadius = 300;
     struct GraphNode *geo = node->sharedChild;
@@ -1480,11 +1558,42 @@ static s32 obj_is_in_view(struct GraphNodeObject *node, Mat4 matrix) {
     if (matrix[3][0] < -hScreenEdge - cullingRadius) {
         return FALSE;
     }
+
+    // And vertically. Vanilla never tested this axis at all, so anything above or
+    // below the camera was drawn no matter how far off screen it was -- every one
+    // of its vertices transformed and lit before gfx_sp_tri1() threw the triangles
+    // away on the clip test. Run 10's gore room passed 1,140 of 1,167 objects
+    // through this function and then drew 2,132 triangles out of 268,000
+    // transformed vertices.
+    if (matrix[3][1] > vScreenEdge + cullingRadius) {
+        return FALSE;
+    }
+    if (matrix[3][1] < -vScreenEdge - cullingRadius) {
+        return FALSE;
+    }
     return TRUE;
 }
 
+// Arms the per-object state reset instead of appending it.
+//
+// This used to call geo_append_display_list_to_all_layers(), putting the stub in
+// all eight master lists for every drawn object whether or not the object had
+// anything to draw in them. In run 10's gore room that was 7,808 of 9,047 nodes
+// in the master list -- 86% of it -- and every one of those nodes costs a
+// DisplayListNode alloc, a MtxInterp alloc, detect_and_skip_mtx_interpolation(),
+// a gSPMatrix and gSPDisplayList emit, a patch_mtx_interpolated() pass, and then
+// a full gfx_run_dl() execution of eleven state commands behind a matrix load.
+// Regressed against the frame log at 1,158 ns per node (R^2 = 0.994), that was
+// 9.0ms of the 11.1ms geo pass, plus roughly 7ms of the display-list pass.
+//
+// Arming it instead makes geo_append_display_list() emit it into a layer the
+// first time the object puts real geometry there, which preserves the invariant
+// the eager version was buying -- every object's display lists in a layer are
+// preceded by that object's state reset -- and drops the stubs for layers the
+// object never touches, which reset state for nothing.
 static void geo_sanitize_object_gfx(void) {
-    geo_append_display_list_to_all_layers(obj_sanitize_gfx);
+    sPendingSanitizeDl = obj_sanitize_gfx;
+    sPendingSanitizeLayers = 0;
 }
 
 static void geo_load_object_gfx_state(void) {
@@ -1638,6 +1747,7 @@ static void geo_process_object(struct Object *node) {
             dynos_gfx_swap_animations(node);
         }
         if (obj_is_in_view(&node->header.gfx, gMatStack[gMatStackIndex])) {
+            PROFILE_ADD(objsDrawn, 1);
             Mtx *mtx = alloc_display_list(sizeof(*mtx));
             Mtx *mtxPrev = alloc_display_list(sizeof(*mtxPrev));
             if (mtx == NULL || mtxPrev == NULL) { return; }
@@ -1654,8 +1764,15 @@ static void geo_process_object(struct Object *node) {
                 }
                 gCurGraphNodeObject = (struct GraphNodeObject *) node;
                 node->header.gfx.sharedChild->parent = &node->header.gfx.node;
+                // Save and restore around the subtree: a held object inside it
+                // arms its own reset, and the holder must get its own back for
+                // any layer it has not reached yet.
+                void *savedSanitizeDl = sPendingSanitizeDl;
+                u32 savedSanitizeLayers = sPendingSanitizeLayers;
                 geo_sanitize_object_gfx();
                 geo_process_node_and_siblings(node->header.gfx.sharedChild);
+                sPendingSanitizeDl = savedSanitizeDl;
+                sPendingSanitizeLayers = savedSanitizeLayers;
                 node->header.gfx.sharedChild->parent = NULL;
                 gCurGraphNodeObject = NULL;
                 gCurMarioBodyState = NULL;
@@ -1783,6 +1900,8 @@ void geo_process_held_object(struct GraphNodeHeldObject *node) {
         // the holder finishes rendering, so let's save the state now
         geo_save_object_gfx_state();
 
+        void *savedSanitizeDl = sPendingSanitizeDl;
+        u32 savedSanitizeLayers = sPendingSanitizeLayers;
         geo_sanitize_object_gfx();
         // While rendering the held object's geo tree, ensure "current object" globals
         // refer to the held object, otherwise Lua geo callbacks can accidentally
@@ -1791,6 +1910,8 @@ void geo_process_held_object(struct GraphNodeHeldObject *node) {
         gCurGraphNodeObject = &node->objNode->header.gfx;
         geo_process_node_and_siblings(node->objNode->header.gfx.sharedChild);
         gCurGraphNodeObject = savedCurGraphNodeObject;
+        sPendingSanitizeDl = savedSanitizeDl;
+        sPendingSanitizeLayers = savedSanitizeLayers;
         gCurGraphNodeHeldObject = NULL;
         gCurAnimType = gGeoTempState.type;
         gCurAnimEnabled = gGeoTempState.enabled;

@@ -41,6 +41,12 @@ void gfx_init(struct GfxWindowManagerAPI *wapi, struct GfxRenderingAPI *rapi, co
 struct GfxRenderingAPI *gfx_get_current_rendering_api(void);
 void gfx_start_frame(void);
 void gfx_run(Gfx *commands);
+
+// Force the renderer to re-import every bound texture on the next frame. Call
+// after anything that changes what a texture pointer resolves to without the
+// display list changing -- texture pack activate/deactivate, Lua texture
+// override set/reset.
+void gfx_texture_state_invalidate(void);
 void gfx_end_frame_render(void);
 void gfx_display_frame(void);
 void gfx_end_frame(void);

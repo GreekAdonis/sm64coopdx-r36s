@@ -31,6 +31,8 @@
 #include "pc/nametags.h"
 #include "engine/lighting_engine.h"
 #include "pc/debug_context.h"
+#include "pc/pc_main.h"
+#include "pc/configfile.h"
 
 struct SpawnInfo gPlayerSpawnInfos[MAX_PLAYERS];
 struct Area gAreaData[MAX_AREAS];
@@ -450,9 +452,16 @@ void play_transition_after_delay(s16 transType, s16 time, u8 red, u8 green, u8 b
 void render_game(void) {
     dynos_update_gfx();
     if (gCurrentArea != NULL && !gWarpTransition.pauseRendering) {
-        CTX_BEGIN_TIMED(CTX_GEO);
-        geo_process_root(gCurrentArea->root, gViewportOverride, gViewportClip, gFBSetColor);
-        CTX_END_TIMED(CTX_GEO);
+        // On a dropped render the 3D scene graph walk is skipped outright, and
+        // the HUD Lua hooks below are skipped too unless render_skip_hud is off.
+        // Everything else here -- the DJUI tree, panels, popups, text labels,
+        // cutscene and transition handling -- still runs, because those carry
+        // state rather than just drawing.
+        if (!gSkipSceneGraph) {
+            CTX_BEGIN_TIMED(CTX_GEO);
+            geo_process_root(gCurrentArea->root, gViewportOverride, gViewportClip, gFBSetColor);
+            CTX_END_TIMED(CTX_GEO);
+        }
 
 #ifdef HANDHELD
         // Everything from here on (HUD, nametags, text, cutscenes, menus, DJUI)
@@ -475,7 +484,12 @@ void render_game(void) {
             if (gServerSettings.nametags && !gDjuiInMainMenu) {
                 nametags_render();
             }
-            smlua_call_event_hooks(HOOK_ON_HUD_RENDER_BEHIND, djui_reset_hud_params);
+            // Same reasoning as HOOK_ON_HUD_RENDER in djui_render(): a dropped
+            // render discards this display list, so drawing into it is work for
+            // a frame that never reaches the screen.
+            if (!(gSkipSceneGraph && configRenderSkipHud)) {
+                smlua_call_event_hooks(HOOK_ON_HUD_RENDER_BEHIND, djui_reset_hud_params);
+            }
             djui_gfx_displaylist_end();
         }
         render_hud();

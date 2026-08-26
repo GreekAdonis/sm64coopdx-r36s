@@ -257,8 +257,261 @@ static void select_graphics_backend(void) {
     }
 }
 
+// Adaptive render dropping.
+//
+// gNetworkAreaTimer is driven by wall clock at 30Hz (see clock_elapsed_ticks()),
+// and cur_obj_update() re-runs an object's behaviour until its own areaTimer
+// catches up to it. That means the simulation's workload per second is fixed by
+// the clock, not by our framerate: at 20fps every area-timer object simply runs
+// its behaviour one and a half times per frame instead of once. So a slow client
+// cannot "do less simulation" -- there is no less to do, and skimping on it is
+// what desyncs the room, because the client keeps broadcasting sync-object state
+// from a simulation running at the wrong rate.
+//
+// Rendering is the part that can give. Measured in a nine-player room on the
+// RK3326: 38.9ms of work against a 33.3ms budget, of which the display-list
+// build, the interpolation pass and the swap were 13.8ms. Dropping those on the
+// frames where we are behind buys back more than twice the overrun, so the
+// simulation converges back to 30Hz instead of falling further behind.
+//
+// Two guards keep the failure mode sane. Consecutive skips are capped so the
+// player always gets a picture, however choppy, rather than a frozen window; and
+// a deadline that has receded more than a second is abandoned rather than
+// chased, so a client that is hopelessly slow does not end up skipping every
+// render forever paying down a backlog it can never clear. A client that still
+// cannot keep up past those is beyond what this can fix -- the missing backstop
+// there is relinquishing sync-object ownership so it stops speaking for objects
+// it is simulating badly.
+
+// Past this the backlog is not payable -- a level load, a mod download, or
+// hardware that simply cannot run this room. Give up on it rather than skipping
+// every render forever chasing a deadline that keeps receding.
+#define RENDER_SKIP_GIVE_UP_SECONDS 1.0
+
+// The deadline may never fall further behind wall clock than this. Bounds the
+// debt so it describes recent lateness rather than everything accrued since the
+// last give-up, which is what the enter/exit thresholds need it to mean.
+//
+// This is a floor on the ceiling, not the ceiling itself: see render_skip_max_debt().
+#define RENDER_SKIP_MAX_DEBT_TICKS 3.0
+
+// How far above the enter threshold the ceiling must sit. The clamp has to leave
+// room for `behind` to actually cross the threshold and then keep rising, or the
+// hysteresis has nothing to work with.
+#define RENDER_SKIP_DEBT_HEADROOM 1.5
+
+// The debt ceiling, in seconds.
+//
+// Run 10 was configured with render_skip_enter_ms 133 -- four ticks -- against a
+// fixed three-tick ceiling. `behind` was clamped to 100ms before the threshold
+// was tested, so it could never reach 133ms and not one render was dropped in
+// 526 seconds of play. The CSV showed simlag_us at exactly 100000 for p50, p90
+// and max, which is the clamp reporting itself rather than a measurement.
+//
+// A ceiling that can silently sit below the threshold it gates makes the config
+// dishonest, so derive it from the threshold instead of fixing it. The constant
+// above stays as a floor for small thresholds, where the point of the clamp is
+// to keep the debt recent rather than to leave the policy room to act.
+static f64 render_skip_max_debt(void) {
+    const f64 floor = sFrameTime * RENDER_SKIP_MAX_DEBT_TICKS;
+    const f64 needed = (configRenderSkipEnterMs / 1000.0) * RENDER_SKIP_DEBT_HEADROOM;
+    return needed > floor ? needed : floor;
+}
+
+// Fraction of the standing debt forgiven by each iteration that met its budget,
+// and how much longer than a tick an iteration may take and still count as
+// on time. The tolerance absorbs scheduling jitter around the frame cap, which
+// lands an on-time iteration at a tick plus a hair rather than exactly a tick.
+#define RENDER_SKIP_DEBT_DECAY 0.0625
+#define RENDER_SKIP_ON_TIME_TOLERANCE 1.05
+
+// Smoothing on the simulation-only cost estimate. Slow enough that one heavy
+// frame does not flip the policy, fast enough to follow a room change.
+#define RENDER_SKIP_SIM_COST_ALPHA 0.05
+
+static f64 sSimDeadline   = 0.0;
+static f64 sLastDeadlineCheck = 0.0;
+static f64 sSimOnlyStart  = 0.0;
+static f64 sSimOnlyCost   = 0.0;
+static u32 sRenderSkipRun = 0;
+static bool sRenderSkipping = false;
+f64 gSimLagSeconds = 0.0;   // published for the profile log
+f64 gSimOnlySeconds = 0.0;  // ditto
+bool gSkipSceneGraph = false;
+
+// Whether dropping renders can still achieve anything.
+//
+// The policy trades displayed frames for simulation rate, to hold the wall-clock
+// 30Hz the netcode's area timer runs on. That trade only pays while the target
+// is reachable -- and it is reachable only if a tick without a render fits in
+// the budget. Once the simulation alone overruns, dropping every render still
+// misses 30Hz, so every dropped frame buys a goal that cannot be met.
+//
+// Run 11 landed exactly there: a simulation-only tick cost 43.9ms against a
+// 33.3ms budget, 1.32x over. The policy dutifully dropped two renders in three
+// and delivered 5.7fps, where not dropping at all would have delivered 11.6fps
+// for 5.6Hz less simulation that was never going to be enough either way.
+//
+// The comment on RENDER_SKIP_GIVE_UP_SECONDS above already names what a client
+// this far gone actually needs -- to stop owning sync objects it is simulating
+// badly. Until that exists, the least bad thing is to stop paying for nothing.
+static bool render_skip_is_futile(void) {
+    if (configRenderSkipFutilePct == 0) { return false; }
+    if (sSimOnlyCost <= 0.0) { return false; }
+    return sSimOnlyCost > sFrameTime * (configRenderSkipFutilePct / 100.0);
+}
+
+// Drops a render only once the simulation has fallen far enough behind wall
+// clock for peers to notice, and stops as soon as it is comfortably back.
+//
+// The original policy skipped whenever it was behind by any amount at all. With
+// no deadband that latches on: in a room even slightly over budget, every
+// rendered iteration puts the client behind again, so it skipped the maximum
+// every time. Run 8 measured exactly that -- the consecutive-skip run lengths
+// were {1: 10, 2: 9339}, i.e. pinned at the cap, holding 29.1Hz of simulation
+// at the cost of 14.3 displayed fps.
+//
+// Dropping renders is still the right trade when it is needed: a client behind
+// wall clock keeps owning sync objects and broadcasting state from a simulation
+// running at the wrong rate, which is what used to take whole rooms down. The
+// question is only when it is needed, and "we overran by a millisecond" is not
+// the same thing as "we are desyncing".
+//
+// So: enter at configRenderSkipEnterMs of lag, leave at configRenderSkipExitMs.
+// The gap between them is what stops the decision chattering frame to frame.
+// A room that is comfortably inside budget now never drops a frame; one that is
+// genuinely falling behind still gets protected.
+static bool should_skip_render(void) {
+    // Single player has no shared clock to stay in step with, and
+    // network_check_singleplayer_pause() stops the area timer there anyway.
+    if (gNetworkType == NT_NONE) {
+        sSimDeadline = 0.0;
+        sLastDeadlineCheck = 0.0;
+        sRenderSkipRun = 0;
+        sRenderSkipping = false;
+        gSimLagSeconds = 0.0;
+        return false;
+    }
+
+    f64 now = clock_elapsed_f64();
+    if (sSimDeadline == 0.0) { sSimDeadline = now; }
+
+    // Wall time this iteration actually took, for the debt decay below.
+    const f64 iterTime = (sLastDeadlineCheck > 0.0) ? (now - sLastDeadlineCheck) : sFrameTime;
+    sLastDeadlineCheck = now;
+
+    // One iteration is one simulation tick, so the deadline advances by exactly
+    // one tick whether or not we met it. Wall clock running past it is the
+    // amount we are behind, and it accumulates fractional overruns that counting
+    // whole gNetworkAreaTimer ticks would round away.
+    sSimDeadline += sFrameTime;
+    f64 behind = now - sSimDeadline;
+
+    // Cap how far the deadline is allowed to fall behind. Without this the
+    // accumulator just runs until RENDER_SKIP_GIVE_UP_SECONDS, so `behind`
+    // reports debt accrued since the last reset -- which run 9 measured at up
+    // to a second old -- rather than how late this iteration actually is.
+    //
+    // That made every threshold below meaningless. A client running 28.8Hz
+    // against a 30Hz requirement accrues 40ms of debt a second, reaches the
+    // one-second give-up after ~25s and resets, so the measure was a sawtooth
+    // between 0 and 1000ms: 90% of multiplayer frames sat above the 66ms enter
+    // threshold and 0.2% below the 16ms exit one. The policy latched on and
+    // never let go.
+    //
+    // Clamped, `behind` means "how late are we now", which is the thing the
+    // thresholds are supposed to be asking about.
+    const f64 maxDebt = render_skip_max_debt();
+    if (behind > maxDebt) {
+        sSimDeadline = now - maxDebt;
+        behind = maxDebt;
+    }
+
+    // An iteration that met its budget pays down a slice of the standing debt.
+    //
+    // Without this the accumulator is a ratchet. The deadline advances by exactly
+    // one tick per iteration while the frame cap guarantees an iteration takes at
+    // least one tick of wall clock, so `behind` can rise and then only ever hold.
+    // Run 10 measured that directly: flat on 4,825 of 8,073 networked transitions,
+    // never once below 65ms, and pinned across a 160-second stretch that was
+    // holding a comfortable 30fps at 32.8ms per frame. A client that hitched once
+    // during a level load read as permanently desyncing, and configRenderSkipExitMs
+    // was unreachable, so the policy could latch on with no way to let go.
+    //
+    // Debt is only payable while renders are being skipped -- those iterations
+    // leave the delay loop early, so they can run shorter than a tick -- which is
+    // exactly the mechanism doing the catching up. Forgiving a fixed fraction per
+    // on-time tick drains a full ceiling to below a 24ms exit threshold in about
+    // three quarters of a second at 30Hz, and a client that is genuinely behind
+    // never gets the on-time ticks to decay with, so an ongoing deficit still
+    // reads as one.
+    if (behind > 0.0 && iterTime <= sFrameTime * RENDER_SKIP_ON_TIME_TOLERANCE) {
+        const f64 forgiven = behind * RENDER_SKIP_DEBT_DECAY;
+        sSimDeadline += forgiven;
+        behind -= forgiven;
+    }
+
+    gSimLagSeconds = behind;
+
+    // The positive half of this is unreachable now that the clamp above bounds
+    // `behind` well below a second; it is kept for the negative half, which
+    // catches the clock jumping backwards under us.
+    if (behind > RENDER_SKIP_GIVE_UP_SECONDS || behind < -RENDER_SKIP_GIVE_UP_SECONDS) {
+        sSimDeadline = now;
+        sLastDeadlineCheck = now;
+        sRenderSkipRun = 0;
+        sRenderSkipping = false;
+        gSimLagSeconds = 0.0;
+        return false;
+    }
+
+    if (configRenderSkipMax == 0 || render_skip_is_futile()) {
+        sRenderSkipping = false;
+        sRenderSkipRun = 0;
+        return false;
+    }
+
+    const f64 enter = configRenderSkipEnterMs / 1000.0;
+    const f64 exit  = configRenderSkipExitMs / 1000.0;
+
+    if (sRenderSkipping) {
+        if (behind < exit) { sRenderSkipping = false; }
+    } else if (behind > enter) {
+        sRenderSkipping = true;
+    }
+
+    if (!sRenderSkipping || sRenderSkipRun >= configRenderSkipMax) {
+        sRenderSkipRun = 0;
+        return false;
+    }
+
+    sRenderSkipRun++;
+    return true;
+}
+
 void produce_interpolation_frames_and_delay(void) {
+    // Close the simulation-only measurement started in produce_one_frame(): the
+    // render has not begun yet, so what has elapsed is exactly the tick's cost
+    // without it. Smoothed, because the decision it feeds should not swing on
+    // one heavy frame.
+    if (sSimOnlyStart > 0.0) {
+        const f64 simOnly = clock_elapsed_f64() - sSimOnlyStart;
+        sSimOnlyStart = 0.0;
+        if (sSimOnlyCost <= 0.0) {
+            sSimOnlyCost = simOnly;
+        } else {
+            sSimOnlyCost += (simOnly - sSimOnlyCost) * RENDER_SKIP_SIM_COST_ALPHA;
+        }
+        gSimOnlySeconds = sSimOnlyCost;
+    }
+
     u32 refreshRate = get_target_refresh_rate();
+
+    // Decided in produce_one_frame(), before the game loop, so that render_game()
+    // could skip the scene graph walk as well. Reading it here keeps the two in
+    // step: the display list this function declines to submit is the same one
+    // that was never built.
+    const bool skipRender = gSkipSceneGraph;
 
     gRenderingInterpolated = true;
 
@@ -292,6 +545,16 @@ void produce_interpolation_frames_and_delay(void) {
         gRenderingDelta = delta;
 
         gfx_start_frame();
+
+        // Deliberately after gfx_start_frame(): that is where window and input
+        // events are pumped, and a client that stops reading them looks hung and
+        // cannot even be closed. Everything below it -- interpolation, the
+        // display-list run and the swap -- is what we are here to skip.
+        if (skipRender) {
+            PROFILE_ADD(renderSkips, 1);
+            break;
+        }
+
         if (!gSkipInterpolationTitleScreen) {
             CTX_BEGIN_TIMED(CTX_INTERP);
             patch_interpolations(delta);
@@ -392,6 +655,18 @@ void *audio_thread(UNUSED void *arg) {
 }
 
 void produce_one_frame(void) {
+    // Evaluated once per game iteration, and before the game loop rather than
+    // inside the render step, because game_loop_one_iteration() is where the
+    // display list gets built. A dropped render used to pay for the scene graph
+    // walk anyway and then throw the result away -- 11.1ms of the 61ms a
+    // simulation-only tick costs in run 10's gore room.
+    gSkipSceneGraph = should_skip_render();
+
+    // Everything from here to the render step is the simulation-only cost of one
+    // tick -- what an iteration would cost if the render were free. That is the
+    // quantity the futile check needs; see render_skip_is_futile().
+    sSimOnlyStart = clock_elapsed_f64();
+
     CTX_EXTENT(CTX_NETWORK, network_update);
 
     CTX_EXTENT(CTX_INTERP, patch_interpolations_before);
@@ -595,8 +870,13 @@ int main(int argc, char *argv[]) {
     // to a second core is the largest structural win available. The locking it
     // needs is already in place throughout src/audio/external.c.
     //
-    // Enable with audio_threaded=1 in sm64config.txt, and soak-test it in a
-    // mod-heavy lobby before trusting it.
+    // Enable with the line `audio_threaded true` in sm64config.txt -- the
+    // config parser compares against the literal string "true"
+    // (configfile.c), so "1", "TRUE" and "yes" all silently read as false.
+    // Edit it with the game closed: config is re-saved during startup and
+    // again on every settings change, so a value that failed to parse gets
+    // written back as false and the edit is lost. Soak-test in a mod-heavy
+    // lobby before trusting it.
     if (configAudioThreaded) {
         init_thread_handle(&gAudioThread, audio_thread, NULL, NULL, 0);
     }

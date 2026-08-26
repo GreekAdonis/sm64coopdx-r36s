@@ -109,6 +109,31 @@ static struct RenderingState {
     struct TextureHashmapNode *textures[2];
 } rendering_state;
 
+// Last result of the state derivation in gfx_sp_tri1(), keyed on the registers
+// it was derived from. See the comment at its use site.
+//
+// The combine mode is keyed by value rather than by a generation counter on
+// purpose. gfx_sp_tri1() mutates rdp.combine_mode in place, but only the flags
+// bitfield -- rgb1/alpha1/rgb2/alpha2 are pure inputs it never touches -- and
+// the key is captured after that mutation, so an unchanged combine mode still
+// compares equal on the next triangle. Watching the words directly means no
+// writer has to cooperate: gfx_dp_texture_rectangle() and
+// gfx_dp_fill_rectangle() both restore rdp.combine_mode by plain struct
+// assignment, which any hand-maintained dirty flag would have missed.
+static struct TriStateCache {
+    bool valid;
+    uint32_t other_mode_l;
+    uint32_t other_mode_h;
+    uint32_t geometry_mode;
+    uint32_t cc_rgb1, cc_alpha1, cc_rgb2, cc_alpha2, cc_flags;
+    const uint8_t *loaded_tex1_addr;
+    bool world_geometry;
+
+    struct ColorCombiner *comb;
+    uint8_t num_inputs;
+    bool used_textures[2];
+} sTriState;
+
 struct GfxDimensions gfx_current_dimensions = { 0 };
 
 static bool dropped_frame = false;
@@ -165,14 +190,83 @@ UNUSED static const uint8_t missing_texture[MISSING_W * MISSING_H * 4] = {
 };
 
 static bool sOnlyTextureChangeOnAddrChange = false;
+
+// Bumped whenever something outside the display list changes what a texture
+// pointer resolves to: a texture pack being activated or deactivated, or a Lua
+// mod calling texture_override_set/reset. The tile-descriptor guards below
+// suppress re-imports when the display list re-states texture state it already
+// stated, which is only sound as long as an out-of-band change still forces one.
+uint32_t gGfxTextureGeneration = 1;
+static uint32_t sSeenTextureGeneration = 0;
+
+void gfx_texture_state_invalidate(void) {
+    gGfxTextureGeneration++;
+    // Also drop the per-tile import memo below by forcing the flag: callers
+    // reach here because something changed what a texture pointer resolves to,
+    // or because the backend dropped a binding we would otherwise assume is
+    // still live.
+    for (size_t i = 0; i < MAX_TEXTURES; i++) { rdp.textures_changed[i] = true; }
+}
+
+// What import_texture() actually consumes for a tile. If every one of these is
+// unchanged since the last completed import, the import is guaranteed to
+// resolve to the texture already bound: gfx_texture_cache_lookup() keys on
+// addr/fmt/siz alone, and the DynOS path keys on the node those resolve to.
+//
+// This matters because the descriptor guards upstream can only suppress a
+// *bit-identical* tile write. A scrolling texture re-stating tile 0's size
+// every frame changes the descriptor for real, so it gets through, and the
+// import then resolves to the same texture anyway -- after a gfx_flush() has
+// already split the batch. Measured on device, 55% of every draw call in a
+// busy multiplayer frame was a rebind of the texture already bound.
+struct TextureImportKey {
+    const uint8_t* addr;
+    uint32_t sizeBytes;
+    uint32_t lineSizeBytes;
+    uint32_t generation;
+    uint8_t  fmt;
+    uint8_t  siz;
+    bool     valid;
+};
+static struct TextureImportKey sLastImport[MAX_TEXTURES];
+
+static bool gfx_texture_import_would_be_noop(int tile) {
+    const struct TextureImportKey* k = &sLastImport[tile];
+    return k->valid
+        && k->generation    == gGfxTextureGeneration
+        && k->addr          == rdp.loaded_texture[tile].addr
+        && k->sizeBytes     == rdp.loaded_texture[tile].size_bytes
+        && k->lineSizeBytes == rdp.texture_tile[tile].line_size_bytes
+        && k->fmt           == rdp.texture_tile[tile].fmt
+        && k->siz           == rdp.texture_tile[tile].siz;
+}
+
+static void gfx_texture_import_remember(int tile) {
+    struct TextureImportKey* k = &sLastImport[tile];
+    k->addr          = rdp.loaded_texture[tile].addr;
+    k->sizeBytes     = rdp.loaded_texture[tile].size_bytes;
+    k->lineSizeBytes = rdp.texture_tile[tile].line_size_bytes;
+    k->generation    = gGfxTextureGeneration;
+    k->fmt           = rdp.texture_tile[tile].fmt;
+    k->siz           = rdp.texture_tile[tile].siz;
+    k->valid         = true;
+}
+
 static void gfx_update_loaded_texture(uint8_t tile_number, uint32_t size_bytes, const uint8_t* addr) {
     if (tile_number >= MAX_TILES) { return; }
     tile_number = rdp.texture_tile[tile_number].index;
-    if (!sOnlyTextureChangeOnAddrChange) {
-        rdp.textures_changed[tile_number] = true;
-    } else if (!rdp.textures_changed[tile_number]) {
-        rdp.textures_changed[tile_number] = rdp.loaded_texture[tile_number].addr != addr;
+    // Re-loading the exact same block from the exact same address leaves every
+    // input to import_texture() bit-identical, so the import would resolve to
+    // the texture that is already bound. Flagging it as changed anyway costs a
+    // gfx_flush() -- i.e. a whole extra draw call -- per repeat. A crowd of
+    // identical objects re-states its shared texture once per object, so this
+    // is the single biggest per-object cost in the renderer.
+    if (!rdp.textures_changed[tile_number]
+        && rdp.loaded_texture[tile_number].addr == addr
+        && rdp.loaded_texture[tile_number].size_bytes == size_bytes) {
+        return;
     }
+    rdp.textures_changed[tile_number] = true;
     rdp.loaded_texture[tile_number].size_bytes = size_bytes;
     rdp.loaded_texture[tile_number].addr = addr;
 }
@@ -187,6 +281,16 @@ void ext_gfx_run_dl(Gfx* cmd);
 /*static unsigned long get_time(void) {
     return 0;
 }*/
+
+// Attributes a batch split to whatever state change forced it, but only when
+// the buffer actually had geometry in it -- a flush on an empty buffer costs
+// nothing and would otherwise inflate whichever cause happened to run first.
+// PROFILE_ADD compiles to nothing outside a profile build, so this collapses
+// back to a bare gfx_flush() there.
+#define FLUSH_FOR(_field) do { \
+    if (buf_vbo_len > 0) { PROFILE_ADD(_field, 1); } \
+    gfx_flush(); \
+} while (0)
 
 static void gfx_flush(void) {
     if (buf_vbo_len > 0) {
@@ -316,7 +420,7 @@ static struct ColorCombiner *gfx_lookup_or_create_color_combiner(struct CombineM
         }
     }
 
-    gfx_flush();
+    FLUSH_FOR(flushCombiner);
 
     struct ColorCombiner *comb = &color_combiner_pool[color_combiner_pool_index];
     color_combiner_pool_index = (color_combiner_pool_index + 1) % CC_MAX_SHADERS;
@@ -350,6 +454,9 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     if (gfx_texture_cache.pool_pos >= sizeof(gfx_texture_cache.pool) / sizeof(struct TextureHashmapNode)) {
         // Pool is full. We just invalidate everything and start over.
         PROFILE_ADD(texCacheFlushes, 1);
+        // Every node is about to be recycled onto different texture ids, so no
+        // memo of a previous import can be trusted.
+        gfx_texture_state_invalidate();
         gfx_texture_cache.pool_pos = 0;
         node = &gfx_texture_cache.hashmap[hash];
         // puts("Clearing texture cache");
@@ -1108,6 +1215,7 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
 
     if (v1->clip_rej & v2->clip_rej & v3->clip_rej) {
         // The whole triangle lies outside the visible area
+        PROFILE_ADD(trisClipRejected, 1);
         return;
     }
 
@@ -1131,10 +1239,10 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
 
         switch (rsp.geometry_mode & G_CULL_BOTH) {
             case G_CULL_FRONT:
-                if (cross <= 0) return;
+                if (cross <= 0) { PROFILE_ADD(trisCullRejected, 1); return; }
                 break;
             case G_CULL_BACK:
-                if (cross >= 0) return;
+                if (cross >= 0) { PROFILE_ADD(trisCullRejected, 1); return; }
                 break;
             case G_CULL_BOTH:
                 // Why is this even an option?
@@ -1146,21 +1254,21 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
 
     bool depth_test = (rsp.geometry_mode & G_ZBUFFER) == G_ZBUFFER;
     if (depth_test != rendering_state.depth_test) {
-        gfx_flush();
+        FLUSH_FOR(flushDepth);
         gfx_rapi->set_depth_test(depth_test);
         rendering_state.depth_test = depth_test;
     }
 
     bool z_upd = (rdp.other_mode_l & Z_UPD) == Z_UPD;
     if (z_upd != rendering_state.depth_mask) {
-        gfx_flush();
+        FLUSH_FOR(flushDepth);
         gfx_rapi->set_depth_mask(z_upd);
         rendering_state.depth_mask = z_upd;
     }
 
     bool zmode_decal = (rdp.other_mode_l & ZMODE_DEC) == ZMODE_DEC;
     if (zmode_decal != rendering_state.decal_mode) {
-        gfx_flush();
+        FLUSH_FOR(flushDepth);
         gfx_rapi->set_zmode_decal(zmode_decal);
         rendering_state.decal_mode = zmode_decal;
     }
@@ -1169,13 +1277,13 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
         static uint32_t x_adjust_4by3_prev;
         if (memcmp(&rdp.viewport, &rendering_state.viewport, sizeof(rdp.viewport)) != 0
             || x_adjust_4by3_prev != gfx_current_dimensions.x_adjust_4by3) {
-            gfx_flush();
+            FLUSH_FOR(flushViewport);
             gfx_rapi->set_viewport(rdp.viewport.x + gfx_current_dimensions.x_adjust_4by3, rdp.viewport.y, rdp.viewport.width, rdp.viewport.height);
             rendering_state.viewport = rdp.viewport;
         }
         if (memcmp(&rdp.scissor, &rendering_state.scissor, sizeof(rdp.scissor)) != 0
             || x_adjust_4by3_prev != gfx_current_dimensions.x_adjust_4by3) {
-            gfx_flush();
+            FLUSH_FOR(flushViewport);
             gfx_rapi->set_scissor(rdp.scissor.x + gfx_current_dimensions.x_adjust_4by3, rdp.scissor.y, rdp.scissor.width, rdp.scissor.height);
             rendering_state.scissor = rdp.scissor;
         }
@@ -1183,71 +1291,121 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
         x_adjust_4by3_prev = gfx_current_dimensions.x_adjust_4by3;
     }
 
-    struct CombineMode* cm = &rdp.combine_mode;
+    // Everything from here down to shader_get_info() is a pure function of the
+    // RDP/RSP registers listed in sTriState below, and consecutive triangles in
+    // a display list almost never change any of them: at roughly fourteen
+    // triangles per draw call in a crowded scene, better than nine in ten of
+    // these derivations reproduce the previous answer exactly. Skipping them
+    // when the inputs are unchanged is what makes gfx_sp_tri1() cheap.
+    //
+    // The key is read from the same state the derivation reads, so the cache
+    // cannot go stale -- there is no dirty flag for a future caller of
+    // gfx_dp_set_other_mode() to forget to set.
+    const bool tri_world_geometry = gShaderFlagsEnabled && gShaderFlagsAny &&
+                                    (v1->world_geometry && v2->world_geometry && v3->world_geometry);
 
-    cm->use_alpha      = (rdp.other_mode_l & (G_BL_A_MEM << 18))        == 0;
-    cm->texture_edge   = (rdp.other_mode_l & CVG_X_ALPHA)               == CVG_X_ALPHA;
-    cm->use_dither     = (rdp.other_mode_l & G_AC_DITHER)               == G_AC_DITHER;
-    cm->use_2cycle     = (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE;
-    cm->use_fog        = (rdp.other_mode_l >> 30)                       == G_BL_CLR_FOG;
-    cm->light_map      = (rsp.geometry_mode & G_LIGHT_MAP_EXT)          == G_LIGHT_MAP_EXT;
-    // gShaderFlagsAny gates this as well as gShaderFlagsEnabled. world_geometry
-    // exists purely to switch on the post-processing block in the fragment
-    // shader (hue/saturation/brightness/contrast/exposure/dither/posterize/
-    // scanlines) -- it means nothing to any other backend. With every flag off,
-    // which is the default and the overwhelmingly common case, that block was
-    // still being compiled in and every fragment paid eight uniform loads,
-    // compares and branches to skip all of it. Folding "is any flag actually on"
-    // into the combine mode means the common case now selects a shader variant
-    // that has none of that code in it. The flag is already part of cm->flags
-    // and therefore of the combiner hash, so variants swap correctly when a mod
-    // turns an effect on or off.
-    cm->world_geometry = gShaderFlagsEnabled && gShaderFlagsAny &&
-                         (v1->world_geometry && v2->world_geometry && v3->world_geometry);
+    if (!sTriState.valid
+        || sTriState.other_mode_l     != rdp.other_mode_l
+        || sTriState.other_mode_h     != rdp.other_mode_h
+        || sTriState.geometry_mode    != rsp.geometry_mode
+        || sTriState.cc_rgb1          != rdp.combine_mode.rgb1
+        || sTriState.cc_alpha1        != rdp.combine_mode.alpha1
+        || sTriState.cc_rgb2          != rdp.combine_mode.rgb2
+        || sTriState.cc_alpha2        != rdp.combine_mode.alpha2
+        || sTriState.cc_flags         != rdp.combine_mode.flags
+        || sTriState.loaded_tex1_addr != rdp.loaded_texture[1].addr
+        || sTriState.world_geometry   != tri_world_geometry) {
 
-    if (cm->texture_edge) {
-        cm->use_alpha = true;
+        struct CombineMode* cm = &rdp.combine_mode;
+
+        cm->use_alpha      = (rdp.other_mode_l & (G_BL_A_MEM << 18))        == 0;
+        cm->texture_edge   = (rdp.other_mode_l & CVG_X_ALPHA)               == CVG_X_ALPHA;
+        cm->use_dither     = (rdp.other_mode_l & G_AC_DITHER)               == G_AC_DITHER;
+        cm->use_2cycle     = (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE;
+        cm->use_fog        = (rdp.other_mode_l >> 30)                       == G_BL_CLR_FOG;
+        cm->light_map      = (rsp.geometry_mode & G_LIGHT_MAP_EXT)          == G_LIGHT_MAP_EXT;
+        // gShaderFlagsAny gates this as well as gShaderFlagsEnabled. world_geometry
+        // exists purely to switch on the post-processing block in the fragment
+        // shader (hue/saturation/brightness/contrast/exposure/dither/posterize/
+        // scanlines) -- it means nothing to any other backend. With every flag off,
+        // which is the default and the overwhelmingly common case, that block was
+        // still being compiled in and every fragment paid eight uniform loads,
+        // compares and branches to skip all of it. Folding "is any flag actually on"
+        // into the combine mode means the common case now selects a shader variant
+        // that has none of that code in it. The flag is already part of cm->flags
+        // and therefore of the combiner hash, so variants swap correctly when a mod
+        // turns an effect on or off.
+        cm->world_geometry = tri_world_geometry;
+
+        if (cm->texture_edge) {
+            cm->use_alpha = true;
+        }
+
+        // hack: disable 2cycle if it uses a second texture that doesn't exist
+        // this is because old rom hacks were ported assuming that 2cycle didn't exist
+        // and were ported incorrectly
+        if (!rdp.loaded_texture[1].addr && cm->use_2cycle && gfx_cm_uses_second_texture(cm)) {
+            cm->use_2cycle = false;
+        }
+
+        sTriState.comb = gfx_lookup_or_create_color_combiner(cm);
+        gfx_rapi->shader_get_info(sTriState.comb->prg, &sTriState.num_inputs, sTriState.used_textures);
+
+        sTriState.other_mode_l     = rdp.other_mode_l;
+        sTriState.other_mode_h     = rdp.other_mode_h;
+        sTriState.geometry_mode    = rsp.geometry_mode;
+        sTriState.cc_rgb1          = rdp.combine_mode.rgb1;
+        sTriState.cc_alpha1        = rdp.combine_mode.alpha1;
+        sTriState.cc_rgb2          = rdp.combine_mode.rgb2;
+        sTriState.cc_alpha2        = rdp.combine_mode.alpha2;
+        sTriState.cc_flags         = rdp.combine_mode.flags;
+        sTriState.loaded_tex1_addr = rdp.loaded_texture[1].addr;
+        sTriState.world_geometry   = tri_world_geometry;
+        sTriState.valid            = true;
     }
 
-    // hack: disable 2cycle if it uses a second texture that doesn't exist
-    // this is because old rom hacks were ported assuming that 2cycle didn't exist
-    // and were ported incorrectly
-    if (!rdp.loaded_texture[1].addr && cm->use_2cycle && gfx_cm_uses_second_texture(cm)) {
-        cm->use_2cycle = false;
-    }
-
-    struct ColorCombiner *comb = gfx_lookup_or_create_color_combiner(cm);
-    cm = &comb->cm;
-
+    struct ColorCombiner *comb = sTriState.comb;
+    struct CombineMode *cm = &comb->cm;
     struct ShaderProgram *prg = comb->prg;
+    uint8_t num_inputs = sTriState.num_inputs;
+    bool used_textures[2] = { sTriState.used_textures[0], sTriState.used_textures[1] };
+
+    // These two guards stay outside the cache. They compare against
+    // rendering_state, which other paths -- the DJUI/2D renderer, a state reset,
+    // a backend that drops its shader -- can move without any of the registers
+    // in the key changing, so they have to be re-checked on every triangle. Both
+    // are a load and a compare in the common case.
     if (prg != rendering_state.shader_program) {
         PROFILE_ADD(shaderLoads, 1);
-        gfx_flush();
+        FLUSH_FOR(flushShader);
         gfx_rapi->unload_shader(rendering_state.shader_program);
         gfx_rapi->load_shader(prg);
         rendering_state.shader_program = prg;
     }
     if (cm->use_alpha != rendering_state.alpha_blend) {
-        gfx_flush();
+        FLUSH_FOR(flushAlpha);
         gfx_rapi->set_use_alpha(cm->use_alpha);
         rendering_state.alpha_blend = cm->use_alpha;
     }
-    uint8_t num_inputs;
-    bool used_textures[2];
-    gfx_rapi->shader_get_info(prg, &num_inputs, used_textures);
 
     for (int32_t i = 0; i < 2; i++) {
         if (used_textures[i]) {
             if (rdp.textures_changed[i]) {
-                gfx_flush();
-                import_texture(i);
+                if (gfx_texture_import_would_be_noop(i)) {
+                    // Nothing to do, and crucially nothing to flush for.
+                    PROFILE_ADD(texImportSkips, 1);
+                } else {
+                    FLUSH_FOR(flushTexture);
+                    import_texture(i);
+                    gfx_texture_import_remember(i);
+                }
                 rdp.textures_changed[i] = false;
             }
             bool linear_filter = configFiltering && ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT);
             struct TextureHashmapNode* tex = rendering_state.textures[i];
             if (tex) {
                 if (linear_filter != tex->linear_filter || rdp.texture_tile[i].cms != tex->cms || rdp.texture_tile[i].cmt != rendering_state.textures[i]->cmt) {
-                    gfx_flush();
+                    FLUSH_FOR(flushSampler);
                     gfx_rapi->set_sampler_parameters(i, linear_filter, rdp.texture_tile[i].cms, rdp.texture_tile[i].cmt);
                     tex->linear_filter = linear_filter;
                     tex->cms = rdp.texture_tile[i].cms;
@@ -1257,7 +1415,13 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
         }
     }
 
-    bool z_is_from_0_to_1 = gfx_rapi->z_is_from_0_to_1();
+    // A property of the backend, fixed for the life of the process, but it was
+    // being fetched through a function pointer once per triangle -- an indirect
+    // call the compiler cannot see through, guarding a branch it could otherwise
+    // fold away entirely.
+    static int8_t sZIsFrom0To1 = -1;
+    if (sZIsFrom0To1 < 0) { sZIsFrom0To1 = gfx_rapi->z_is_from_0_to_1() ? 1 : 0; }
+    const bool z_is_from_0_to_1 = (sZIsFrom0To1 != 0);
 
     for (int32_t i = 0; i < 3; i++) {
         float z = v_arr[i]->z, w = v_arr[i]->w;
@@ -1384,7 +1548,7 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
         buf_vbo[buf_vbo_len++] = color->a / 255.0f;*/
     }
     if (++buf_vbo_num_tris == MAX_BUFFERED) {
-        gfx_flush();
+        FLUSH_FOR(flushBufferFull);
     }
 }
 
@@ -1527,7 +1691,46 @@ static void gfx_dp_set_texture_image(UNUSED uint32_t format, uint32_t size, UNUS
     rdp.texture_to_load.siz = size;
 }
 
+// Marks the render tiles a tile-descriptor write invalidates. gfx_sp_tri1()
+// imports tiles 0 and 1 independently -- each reads only its own
+// rdp.texture_tile[i] and rdp.loaded_texture[i] -- so writing tile 0's
+// descriptor cannot change what tile 1 resolves to. Invalidating both, as this
+// used to, forces a re-import of tile 1 that resolves to the texture already
+// bound there: a gfx_flush(), i.e. an extra draw call, for nothing.
+//
+// It costs the most exactly where the device is slowest. Two-cycle shaders are
+// what make tile 1 get imported at all, so water-heavy levels pay it on every
+// single tile-0 change: Secret Aquarium measured 3.77 redundant binds per real
+// bind and 473 draws a frame, against 0.08 and 97 in Castle Grounds.
+//
+// Load tiles (anything but 0 and 1) still invalidate both, since which render
+// tile they feed depends on rdp.texture_tile[].index resolved later.
+static void gfx_mark_tile_changed(uint8_t tile) {
+    if (sOnlyTextureChangeOnAddrChange) { return; }
+    if (tile < MAX_TEXTURES) {
+        rdp.textures_changed[tile] = true;
+    } else {
+        for (size_t i = 0; i < MAX_TEXTURES; i++) { rdp.textures_changed[i] = true; }
+    }
+}
+
 static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t tmem, uint8_t tile, uint32_t palette, uint32_t cmt, uint32_t maskt, uint32_t shiftt, uint32_t cms, uint32_t masks, uint32_t shifts) {
+    // Same reasoning as gfx_update_loaded_texture(): if every field this writes
+    // already holds the value being written, the tile is unchanged and nothing
+    // downstream needs re-importing.
+    const struct TextureTile* prev = &rdp.texture_tile[tile];
+    bool unchanged = prev->fmt             == fmt
+                  && prev->siz             == siz
+                  && prev->cms             == cms
+                  && prev->cmt             == cmt
+                  && prev->shifts          == shifts
+                  && prev->shiftt          == shiftt
+                  && prev->masks           == masks
+                  && prev->maskt           == maskt
+                  && prev->line_size_bytes == line * 8
+                  && prev->tmem            == tmem
+                  && prev->palette         == palette;
+
     rdp.texture_tile[tile].fmt = fmt;
     rdp.texture_tile[tile].siz = siz;
     rdp.texture_tile[tile].cms = cms;
@@ -1541,21 +1744,19 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
     rdp.texture_tile[tile].palette = palette;
     // For some reason toad player's face breaks without this line, everything else is fine though
     rdp.texture_tile[tile].index = (tile == G_TX_LOADTILE ? tmem/256 : (tile == G_TX_LOADTILE_6_UNKNOWN ? 1 : 0));
-    if (!sOnlyTextureChangeOnAddrChange) {
-        rdp.textures_changed[0] = true;
-        rdp.textures_changed[1] = true;
-    }
+    if (!unchanged) { gfx_mark_tile_changed(tile); }
 }
 
 static void gfx_dp_set_tile_size(uint8_t tile, uint16_t uls, uint16_t ult, uint16_t lrs, uint16_t lrt) {
+    const struct TextureTile* prev = &rdp.texture_tile[tile];
+    bool unchanged = prev->uls == uls && prev->ult == ult
+                  && prev->lrs == lrs && prev->lrt == lrt;
+
     rdp.texture_tile[tile].uls = uls;
     rdp.texture_tile[tile].ult = ult;
     rdp.texture_tile[tile].lrs = lrs;
     rdp.texture_tile[tile].lrt = lrt;
-    if (!sOnlyTextureChangeOnAddrChange) {
-        rdp.textures_changed[0] = true;
-        rdp.textures_changed[1] = true;
-    }
+    if (!unchanged) { gfx_mark_tile_changed(tile); }
 }
 
 static void gfx_dp_load_tlut(uint8_t tile, uint32_t high_index) {
@@ -2132,6 +2333,9 @@ void gfx_start_frame(void) {
         gGfxPcResetTex1--;
         rdp.loaded_texture[1].addr = NULL;
         rdp.loaded_texture[1].size_bytes = 0;
+        // A tile-0 write used to invalidate tile 1 as a side effect and cover
+        // this; gfx_mark_tile_changed() no longer does, so say it explicitly.
+        rdp.textures_changed[1] = true;
     }
     gfx_wapi->handle_events();
     gfx_wapi->get_dimensions(&gfx_current_dimensions.width, &gfx_current_dimensions.height);
@@ -2150,6 +2354,17 @@ void gfx_start_frame(void) {
 
 void gfx_run(Gfx *commands) {
     gfx_sp_reset();
+
+    // A texture pack toggle or a Lua texture override changes what an unchanged
+    // texture pointer resolves to, which the tile-descriptor guards in
+    // gfx_update_loaded_texture()/gfx_dp_set_tile()/gfx_dp_set_tile_size()
+    // cannot see. Force one re-import pass when that happens.
+    if (sSeenTextureGeneration != gGfxTextureGeneration) {
+        sSeenTextureGeneration = gGfxTextureGeneration;
+        for (size_t i = 0; i < MAX_TEXTURES; i++) {
+            rdp.textures_changed[i] = true;
+        }
+    }
 
     sHasInverseCameraMatrix = false;
 
@@ -2546,6 +2761,14 @@ void OPTIMIZE_O3 ext_gfx_run_dl(Gfx* cmd) {
         case G_HANDHELD_HUD_PASS_EXT:
             gfx_flush();
             gfx_opengl_handheld_end_world_pass();
+            // The blit binds the FBO colour texture to unit 0 behind
+            // select_texture()'s back and clears its cached binding so the next
+            // select_texture() rebinds. That only works if a select_texture()
+            // actually happens -- and the tile-descriptor guards above will
+            // happily skip the import when the HUD re-states a texture the
+            // world pass already had. Force one re-import so the HUD does not
+            // draw itself with the framebuffer it just blitted.
+            gfx_texture_state_invalidate();
             break;
 #endif
     }

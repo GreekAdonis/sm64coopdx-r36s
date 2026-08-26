@@ -7,6 +7,7 @@
 #include "pc/mods/mod_storage.h"
 #include "pc/mods/mod_fs.h"
 #include "pc/crash_handler.h"
+#include "pc/configfile.h"
 #include "pc/lua/utils/smlua_text_utils.h"
 #include "pc/lua/utils/smlua_audio_utils.h"
 #include "pc/lua/utils/smlua_model_utils.h"
@@ -317,6 +318,23 @@ void smlua_init(void) {
 
     gLuaState = luaL_newstate();
     lua_State* L = gLuaState;
+
+    // Collector tuning, off by default so the stock behaviour is unchanged.
+    //
+    // Lua 5.3's collector is incremental and single-threaded, and cannot be
+    // moved to another core: global_State owns the allocator, the gray lists and
+    // the string table, and the VM mutates object headers and fires write
+    // barriers as it runs. What can be tuned is how hard it works. The pause is
+    // how much the heap may grow before a cycle starts and the step multiplier
+    // is how much collecting each step does, both as percentages of the
+    // interpreter's 200 default; raising them trades memory for CPU, which is
+    // the trade this device wants.
+    //
+    // Left at the default until measured: run 11 could only attribute 8.18% of
+    // samples to libc as a whole, not to the allocator specifically, so how much
+    // is here is an open question these keys exist to answer.
+    if (configLuaGcPause != 0)   { lua_gc(L, LUA_GCSETPAUSE, (int)configLuaGcPause); }
+    if (configLuaGcStepMul != 0) { lua_gc(L, LUA_GCSETSTEPMUL, (int)configLuaGcStepMul); }
 
     // load libraries
     luaopen_base(L);

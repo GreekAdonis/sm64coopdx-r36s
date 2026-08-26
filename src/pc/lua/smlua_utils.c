@@ -417,9 +417,14 @@ CObject *smlua_push_object(lua_State* L, u16 lot, void* p, void *extraInfo) {
     LUA_STACK_CHECK_BEGIN_NUM(L, 1);
 
     uintptr_t key = smlua_get_pointer_key(p, lot);
+    // gSmLuaCObjects is a plain table created with lua_newtable() and never
+    // given a metatable, so the raw accessors here and below are equivalent to
+    // lua_gettable/lua_settable while skipping the metamethod check -- and
+    // rawgeti/rawseti take the key directly instead of pushing it. This runs
+    // once per cobject handed to Lua, which includes every object passed to
+    // every behaviour callback on every frame.
     lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaCObjects);
-    lua_pushinteger(L, key);
-    lua_gettable(L, -2);
+    lua_rawgeti(L, -1, (lua_Integer) key);
     if (lua_isuserdata(L, -1)) {
         CObject *cobj = lua_touserdata(L, -1);
         if (cobj && cobj->lot == lot && cobj->pointer == p) {
@@ -436,9 +441,8 @@ CObject *smlua_push_object(lua_State* L, u16 lot, void* p, void *extraInfo) {
     cobject->info = extraInfo;
     lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaCObjectMetatable);
     lua_setmetatable(L, -2);
-    lua_pushinteger(L, key);
-    lua_pushvalue(L, -2); // Duplicate userdata
-    lua_settable(L, -4);
+    lua_pushvalue(L, -1); // Duplicate userdata
+    lua_rawseti(L, -3, (lua_Integer) key);
     lua_remove(L, -2); // Remove gSmLuaCObjects table
 
     LUA_STACK_CHECK_END(L);

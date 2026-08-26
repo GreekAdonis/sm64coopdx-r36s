@@ -47,6 +47,7 @@
 #undef near
 #undef far
 #include "game/rendering_graph_node.h"
+#include "pc/debug_context.h"
 
 // Mario 64 specific externs
 extern s16 sCurrPlayMode;
@@ -352,7 +353,9 @@ void network_send_to(u8 localIndex, struct Packet* p) {
         if (!buffer || len == 0) {
             LOG_ERROR("Failed to compress!");
         } else {
+            CTX_BEGIN_TIMED(CTX_NET_SOCKET);
             int rc = gNetworkSystem->send(localIndex, p->addr, buffer, len);
+            CTX_END_TIMED(CTX_NET_SOCKET);
             if (rc == SOCKET_ERROR) { LOG_ERROR("send error %d", rc); return; }
         }
     }
@@ -415,13 +418,13 @@ void network_send(struct Packet* p) {
 void network_receive(u8 localIndex, void* addr, u8* data, u16 dataLength) {
 
     // receive packet
-    struct Packet p = {
-        .localIndex = localIndex,
-        .cursor = 3,
-        .addr = addr,
-        .buffer = { 0 },
-        .dataLength = dataLength,
-    };
+    // buffer is left alone: packet_decompress() overwrites it immediately.
+    struct Packet p;
+    packet_zero_header(&p);
+    p.localIndex = localIndex;
+    p.cursor     = 3;
+    p.addr       = addr;
+    p.dataLength = dataLength;
     if (!packet_decompress(&p, data, dataLength)) {
         LOG_ERROR("Failed to decompress!");
         return;

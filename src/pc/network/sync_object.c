@@ -278,16 +278,24 @@ void sync_object_override_object(u32 syncId, struct Object* o) {
  // utils //
 ///////////
 
-// todo: move this to somewhere more general
-float player_distance(struct MarioState* marioState, struct Object* o) {
+// Squared distance, for callers that only compare distances against each other.
+// Ordering is monotonic in the square, so the square root is pure cost. Nothing
+// here can overflow f32: SM64 coordinates run to a few times 10^4, so the sum of
+// squares stays around 10^9 against a float maximum of 3.4*10^38.
+static f32 player_distance_sq(struct MarioState* marioState, struct Object* o) {
     if (marioState->marioObj == NULL) { return 0; }
     f32 mx = marioState->marioObj->header.gfx.pos[0] - o->oPosX;
     f32 my = marioState->marioObj->header.gfx.pos[1] - o->oPosY;
     f32 mz = marioState->marioObj->header.gfx.pos[2] - o->oPosZ;
-    mx *= mx;
-    my *= my;
-    mz *= mz;
-    return sqrt(mx + my + mz);
+    return mx * mx + my * my + mz * mz;
+}
+
+// todo: move this to somewhere more general
+float player_distance(struct MarioState* marioState, struct Object* o) {
+    if (marioState->marioObj == NULL) { return 0; }
+    // sqrtf, not sqrt: the double version promotes three f32s to f64 on a core
+    // with no FP64 vector unit, for a result that is immediately narrowed back.
+    return sqrtf(player_distance_sq(marioState, o));
 }
 
 bool sync_object_should_own(u32 syncId) {
@@ -319,10 +327,17 @@ bool sync_object_should_own(u32 syncId) {
 
     if (so->o->oHeldState == HELD_HELD && so->o->heldByPlayerIndex == 0) { return true; }
 
-    // check distance
-    for (s32 i = 0; i < MAX_PLAYERS; i++) {
-        if (i != 0 && !is_player_in_local_area(&gMarioStates[i])) { continue; }
-        if (player_distance(&gMarioStates[0], so->o) > player_distance(&gMarioStates[i], so->o)) { return false; }
+    // Check distance: we own the object if nobody in our area is closer to it.
+    //
+    // This runs once per sync object per frame and always walks all MAX_PLAYERS
+    // slots, so it is worth not doing anything twice. The local player's
+    // distance is loop-invariant and used to be recomputed on every iteration,
+    // and comparing squares avoids a square root per player per object.
+    // Iteration 0 compared the local player against itself.
+    f32 localDistSq = player_distance_sq(&gMarioStates[0], so->o);
+    for (s32 i = 1; i < MAX_PLAYERS; i++) {
+        if (!is_player_in_local_area(&gMarioStates[i])) { continue; }
+        if (localDistSq > player_distance_sq(&gMarioStates[i], so->o)) { return false; }
     }
 
     if (so->o->oHeldState == HELD_HELD && so->o->heldByPlayerIndex != 0) { return false; }

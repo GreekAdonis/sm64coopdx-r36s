@@ -12,6 +12,7 @@
 #include "game/hud.h"
 #include "game/level_update.h"
 #include "pc/debug_context.h"
+#include "pc/profile_log.h"
 #include "pc/network/network.h"
 #include "pc/network/network_player.h"
 #include "pc/network/socket/socket.h"
@@ -50,6 +51,55 @@ static const char* sLuaHookedEventTypeName[] = {
     [HOOK_MAX] = "HOOK_MAX"
 };
 
+#ifdef PROFILE_BUILD
+
+  ///////////////////////////////
+ // per-hook-type attribution //
+///////////////////////////////
+
+// hookCalls and us_hook are single global counters. They can say a frame spent
+// 16ms inside mod callbacks; they cannot say which callback. That matters
+// because hook call *volume* barely moves with player count (+3 per player
+// against a base of ~470) while hook *time* rises ~1.2ms per player -- so the
+// cost is a once-per-frame hook whose body walks the player list, and naming it
+// is the only way into that time.
+//
+// Index HOOK_MAX collects everything that does not arrive through the
+// smlua_call_event_hooks() macro: per-object behaviour callbacks and the
+// hand-written dispatchers.
+//
+// Timing is inclusive, matching the CTX timers -- a hook that triggers another
+// hook is charged for the inner one as well. The two extra clock reads per call
+// only exist in a profile build, which already pays the same pair for CTX_HOOK.
+// Two buckets past the real hook types: per-object behaviour callbacks, which
+// reach smlua_call_hook() by their own path rather than through the macro, and
+// anything else that turns up untagged.
+#define PROFILE_HOOK_BEHAVIOR (HOOK_MAX + 1)
+#define PROFILE_HOOK_SLOTS    (HOOK_MAX + 2)
+
+u16 gProfileCurHookType = HOOK_MAX;
+static u32 sHookTypeCalls[PROFILE_HOOK_SLOTS] = { 0 };
+static f64 sHookTypeUs[PROFILE_HOOK_SLOTS] = { 0 };
+
+void profile_dump_hook_types(const char* path) {
+    FILE* f = fopen(path, "w");
+    if (!f) { return; }
+
+    fprintf(f, "hook,calls,us\n");
+    for (u32 i = 0; i < (u32)PROFILE_HOOK_SLOTS; i++) {
+        if (sHookTypeCalls[i] == 0) { continue; }
+        const char* name;
+        if (i == (u32)PROFILE_HOOK_BEHAVIOR) { name = "(behaviour callback)"; }
+        else if (i == (u32)HOOK_MAX)         { name = "(untagged)"; }
+        else                                 { name = sLuaHookedEventTypeName[i]; }
+        fprintf(f, "%s,%u,%.0f\n", name ? name : "(unknown)", sHookTypeCalls[i], sHookTypeUs[i]);
+    }
+
+    fclose(f);
+}
+
+#endif
+
 int smlua_call_hook(lua_State* L, int nargs, int nresults, int errfunc, struct Mod* activeMod, struct ModFile* activeModFile) {
     if (!gGameInited) { return 0; } // Don't call hooks while the game is booting
 
@@ -63,9 +113,31 @@ int smlua_call_hook(lua_State* L, int nargs, int nresults, int errfunc, struct M
 
     lua_profiler_start_counter(activeMod);
 
+#ifdef PROFILE_BUILD
+    // Borrow the pending hook type and clear it for the duration of the call,
+    // so a hook fired from inside this one's body is not mislabelled as ours.
+    //
+    // It has to be put back afterwards, not left cleared: a dispatcher loops
+    // over every mod that hooked the event and calls in here once per mod, and
+    // the macro only tags the call site once. Clearing it permanently attributed
+    // the first mod's callback to the hook and every other mod's to the
+    // catch-all, which in run 8 buried 78% of all hook time in
+    // "(behavior/manual)".
+    u16 profHookType = gProfileCurHookType;
+    gProfileCurHookType = HOOK_MAX;
+    f64 profStart = clock_elapsed_f64();
+#endif
+
+    PROFILE_ADD(hookCalls, 1);
     CTX_BEGIN(CTX_HOOK);
     int rc = smlua_pcall(L, nargs, nresults, errfunc);
     CTX_END(CTX_HOOK);
+
+#ifdef PROFILE_BUILD
+    sHookTypeCalls[profHookType]++;
+    sHookTypeUs[profHookType] += (clock_elapsed_f64() - profStart) * 1000000.0;
+    gProfileCurHookType = profHookType;
+#endif
 
     lua_profiler_stop_counter(activeMod);
 
@@ -701,7 +773,91 @@ u32 smlua_get_action_interaction_type(struct MarioState* m) {
 
 struct GrowingArray *gHookedBehaviors = NULL;
 
+  ///////////////////////////////////
+ // hooked behavior lookup index  //
+///////////////////////////////////
+
+// smlua_call_behavior_hook() runs for every object on every frame, and this
+// lookup used to be a linear scan of every hooked behavior. With a few hundred
+// objects and a mod that hooks a handful of behaviours it measured ~1% of the
+// entire main thread -- all of it re-deriving an answer that only changes when
+// mods load. Worse, the overwhelmingly common outcome is "not hooked", which is
+// exactly the case the scan pays full price for.
+//
+// Two lookups cover every id the scan could match:
+//   - Custom ids are handed out densely as LUA_BEHAVIOR_START + count, so a
+//     custom id is its own index into the array.
+//   - Vanilla ids (< id_bhv_max_count) get a small direct-mapped table.
+//
+// Entries are only ever appended (smlua_clear_hooks() resets the array
+// wholesale), and behaviorId/customId are assigned immediately after the
+// allocation and never mutated, so tracking the count is enough to know the
+// index is current. Every hit is verified against the entry before being
+// returned, so even a stale index can only cost a fallback scan -- never a
+// wrong behaviour.
+
+#define LUA_BHV_INDEX_NONE 0xFFFF
+
+static u16 sHookedBhvByVanillaId[id_bhv_max_count];
+static u32 sHookedBhvIndexCount = (u32) -1;
+
+static void smlua_rebuild_hooked_behavior_index(void) {
+    for (u32 i = 0; i < (u32) id_bhv_max_count; i++) {
+        sHookedBhvByVanillaId[i] = LUA_BHV_INDEX_NONE;
+    }
+
+    u32 count = gHookedBehaviors ? gHookedBehaviors->count : 0;
+    for (u32 i = 0; i < count; i++) {
+        struct LuaHookedBehavior* hooked = gHookedBehaviors->buffer[i];
+        if (!hooked) { continue; }
+        // First writer wins, matching the scan order this replaces.
+        if (hooked->behaviorId < id_bhv_max_count
+            && sHookedBhvByVanillaId[hooked->behaviorId] == LUA_BHV_INDEX_NONE) {
+            sHookedBhvByVanillaId[hooked->behaviorId] = (u16) i;
+        }
+    }
+
+    sHookedBhvIndexCount = count;
+}
+
+static void smlua_invalidate_hooked_behavior_index(void) {
+    sHookedBhvIndexCount = (u32) -1;
+}
+
 static struct LuaHookedBehavior *smlua_find_hooked_behavior(enum BehaviorId id) {
+    if (!gHookedBehaviors) { return NULL; }
+
+    u32 count = gHookedBehaviors->count;
+    if (count == 0) { return NULL; }
+
+    if (sHookedBhvIndexCount != count) { smlua_rebuild_hooked_behavior_index(); }
+
+    if (id >= LUA_BEHAVIOR_START) {
+        // A custom id is its own index.
+        u32 i = (u32) id - LUA_BEHAVIOR_START;
+        if (i < count) {
+            struct LuaHookedBehavior* hooked = gHookedBehaviors->buffer[i];
+            if (hooked && (hooked->customId == id || hooked->behaviorId == id)) {
+                return hooked;
+            }
+        }
+    } else if (id < id_bhv_max_count) {
+        u16 i = sHookedBhvByVanillaId[id];
+        if (i == LUA_BHV_INDEX_NONE) {
+            // The table was just rebuilt from the full array, so no entry here
+            // means nothing claims this id. This is the hot path: most objects
+            // in a scene run a behaviour no mod has hooked.
+            return NULL;
+        }
+        if (i < count) {
+            struct LuaHookedBehavior* hooked = gHookedBehaviors->buffer[i];
+            if (hooked && (hooked->behaviorId == id || hooked->customId == id)) {
+                return hooked;
+            }
+        }
+    }
+
+    // Ids that fall between the two ranges, or a hit that failed verification.
     growing_array_for_each_(gHookedBehaviors, struct LuaHookedBehavior, hooked) {
         if (hooked->behaviorId == id || hooked->customId == id) {
             return hooked;
@@ -1061,6 +1217,9 @@ void smlua_call_behavior_hook(struct Object* object) {
         bool init = object->curBhvCommand == object->initBhvCommand;
 
         // Run callbacks one after the other
+#ifdef PROFILE_BUILD
+        gProfileCurHookType = PROFILE_HOOK_BEHAVIOR;
+#endif
         struct GrowingArray *callbacks = init ? hooked->initCallbacks : hooked->loopCallbacks;
         growing_array_for_each_(callbacks, struct LuaHookedBehaviorCallback, callback) {
 
@@ -1071,6 +1230,7 @@ void smlua_call_behavior_hook(struct Object* object) {
             smlua_push_object(L, LOT_OBJECT, object, NULL);
 
             // call the callback
+            PROFILE_ADD(hookBehavior, 1);
             if (0 != smlua_call_hook(L, 1, 0, 0, callback->mod, callback->modFile)) {
                 LOG_LUA("Failed to call behavior %s callback for behavior id: %hu",
                     (init ? "init" : "loop"), hooked->behaviorId
@@ -1954,6 +2114,7 @@ void smlua_clear_hooks(void) {
         growing_array_free(&hooked->loopCallbacks);
     }
     gHookedBehaviors = growing_array_init(gHookedBehaviors, 16, malloc, free);
+    smlua_invalidate_hooked_behavior_index();
 }
 
 void smlua_bind_hooks(void) {

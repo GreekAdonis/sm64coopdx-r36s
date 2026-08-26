@@ -544,6 +544,26 @@ OPTIMIZE_O3 void mtxf_rotate_xyz_and_translate(VEC_OUT Mat4 dest, Vec3f b, Vec3s
     dest[3][3] = 1;
 }
 
+// Every billboard/cylboard in a scene shares the same 'angle' (the current camera's
+// roll), so the coss()/sins() lookup it drives is identical across every instance in
+// a frame. Memoize the last (angle -> cos, sin) pair so the common case of many
+// consecutive billboards is one comparison instead of two table reads.
+static s16 sBillboardAngleCache = 0;
+static f32 sBillboardCosCache = 1.0f;
+static f32 sBillboardSinCache = 0.0f;
+static bool sBillboardCacheValid = false;
+
+static inline void billboard_rotation_for_angle(s16 angle, f32* outCos, f32* outSin) {
+    if (!sBillboardCacheValid || angle != sBillboardAngleCache) {
+        sBillboardAngleCache = angle;
+        sBillboardCosCache = coss(angle);
+        sBillboardSinCache = sins(angle);
+        sBillboardCacheValid = true;
+    }
+    *outCos = sBillboardCosCache;
+    *outSin = sBillboardSinCache;
+}
+
 /**
  * Set 'dest' to a transformation matrix that turns an object to face the camera.
  * 'mtx' is the look-at matrix from the camera
@@ -551,8 +571,11 @@ OPTIMIZE_O3 void mtxf_rotate_xyz_and_translate(VEC_OUT Mat4 dest, Vec3f b, Vec3s
  * 'angle' rotates the object while still facing the camera.
  */
 OPTIMIZE_O3 void mtxf_billboard(VEC_OUT Mat4 dest, Mat4 mtx, Vec3f position, s16 angle) {
-    dest[0][0] = coss(angle);
-    dest[0][1] = sins(angle);
+    f32 cosAngle, sinAngle;
+    billboard_rotation_for_angle(angle, &cosAngle, &sinAngle);
+
+    dest[0][0] = cosAngle;
+    dest[0][1] = sinAngle;
     dest[0][2] = 0;
     dest[0][3] = 0;
 
@@ -574,8 +597,11 @@ OPTIMIZE_O3 void mtxf_billboard(VEC_OUT Mat4 dest, Mat4 mtx, Vec3f position, s16
 
 // straight up mtxf_billboard but minus the dest[1][n] lines. transform for cylindrical billboards
 OPTIMIZE_O3 void mtxf_cylboard(VEC_OUT Mat4 dest, Mat4 mtx, Vec3f position, s16 angle) {
-    dest[0][0] = coss(angle);
-    dest[0][1] = sins(angle);
+    f32 cosAngle, sinAngle;
+    billboard_rotation_for_angle(angle, &cosAngle, &sinAngle);
+
+    dest[0][0] = cosAngle;
+    dest[0][1] = sinAngle;
     dest[0][2] = 0;
     dest[0][3] = 0;
 

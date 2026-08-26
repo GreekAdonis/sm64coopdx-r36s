@@ -31,6 +31,21 @@ extern struct GfxWindowManagerAPI* gWindowApi;
 extern struct GfxRenderingAPI* gRenderApi;
 
 extern bool gGameInited;
+
+// How far the simulation is behind wall clock, in seconds, as of the current
+// iteration. Positive means late. Drives should_skip_render() and is logged by
+// profile builds so the drop thresholds can be tuned against real numbers
+// rather than guessed at.
+extern f64 gSimLagSeconds;
+
+// Smoothed cost of one simulation tick with the render excluded. Above the tick
+// budget, dropping renders cannot reach 30Hz and the policy stops trying.
+extern f64 gSimOnlySeconds;
+
+// Set once per iteration, before the game loop runs. True means this frame's
+// render is being dropped to let the simulation catch up, so render_game() skips
+// the scene graph walk that would only build a display list nobody submits.
+extern bool gSkipSceneGraph;
 extern bool gGfxInited;
 
 extern f32 gMasterVolume;
