@@ -49,6 +49,13 @@ enum DebugContext {
     // the pair sets a ceiling on what threading the network could actually buy.
     CTX_NET_CODEC,   // zlib compress/decompress of packet payloads
     CTX_NET_SOCKET,  // the send syscall itself
+    // Everything the receive path does: gNetworkSystem->update(), which for
+    // coopnet is the library's own socket reads, packet dispatch and mod
+    // downloading. Run 18's two lockups -- 7.6s on a join and 1.4s in the middle
+    // of ordinary play -- were both almost entirely inside CTX_NETWORK with
+    // codec and socket accounting for under 20ms between them, which left the
+    // largest cost in the run with no name. This gives it one.
+    CTX_NET_RECV,
     CTX_DELAY,       // frame-cap sleep/busy-wait; idle time, not work
     CTX_MAX,
     // MUST BE KEPT IN SYNC WITH sDebugContextNames

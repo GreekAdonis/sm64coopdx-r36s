@@ -17,6 +17,7 @@
 #include <sys/time.h>
 #include <ucontext.h>
 #include <link.h>
+#include <pthread.h>
 
 // Where the sampled program counter lives in the signal's ucontext.
 #if defined(__aarch64__)
@@ -55,6 +56,13 @@ static bool sTimerCreated = false;
 static bool sRunning = false;
 static int sHz = PROFILE_DEFAULT_HZ;
 
+// Window state. Only the main thread touches these; the handler never does.
+static FILE  *sFile = NULL;
+static double sWindowSeconds = 0.0;
+static double sWindowStart = 0.0;
+static unsigned int sWindowIndex = 0;
+static unsigned long sTotalWritten = 0;
+
 static void profile_sample_handler(int sig, siginfo_t *info, void *uc) {
     (void)sig; (void)info;
     // Only the game thread is interesting. The timer counts this thread's CPU
@@ -76,7 +84,74 @@ static void profile_sample_handler(int sig, siginfo_t *info, void *uc) {
     sOverflow++;
 }
 
-void profile_sample_init(void) {
+struct ProfileModuleWriter {
+    FILE *f;
+    int index;
+};
+
+static int profile_sample_write_module(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size;
+    struct ProfileModuleWriter *w = (struct ProfileModuleWriter *)data;
+    const char *name = (info->dlpi_name && info->dlpi_name[0]) ? info->dlpi_name : "(main)";
+
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_LOAD || !(ph->p_flags & PF_X)) { continue; }
+        unsigned long start = (unsigned long)(info->dlpi_addr + ph->p_vaddr);
+        fprintf(w->f, "map 0x%lx 0x%lx 0x%lx %s\n",
+                start, start + (unsigned long)ph->p_memsz,
+                (unsigned long)info->dlpi_addr, name);
+    }
+    w->index++;
+    return 0;
+}
+
+// Writes everything currently in the table as one window and empties it.
+//
+// The handler runs on this same thread, so it can interrupt the walk below and
+// leave a window half-counted. Blocking SIGPROF for the duration is one syscall
+// pair per window -- once every 30 seconds -- and costs at most the single
+// sample that would have landed during the flush, which the kernel delivers
+// afterwards anyway.
+static void profile_sample_flush_window(double nowSeconds) {
+    if (!sFile) { return; }
+
+    sigset_t block, prev;
+    sigemptyset(&block);
+    sigaddset(&block, SIGPROF);
+    pthread_sigmask(SIG_BLOCK, &block, &prev);
+
+    unsigned int taken = sTaken, other = sOtherThread, full = sOverflow, nopc = sNoPc;
+    sTaken = sOtherThread = sOverflow = sNoPc = 0;
+
+    fprintf(sFile, "window %u %.3f %.3f %u %u %u %u\n",
+            sWindowIndex, sWindowStart, nowSeconds, taken, other, full, nopc);
+
+    for (size_t i = 0; i < PROFILE_TABLE_SIZE; i++) {
+        if (sSlots[i].pc == 0) { continue; }
+        fprintf(sFile, "0x%lx %u\n", sSlots[i].pc, sSlots[i].count);
+        sSlots[i].pc = 0;
+        sSlots[i].count = 0;
+    }
+
+    pthread_sigmask(SIG_SETMASK, &prev, NULL);
+
+    // Flush to the OS so a kill -9 keeps every completed window.
+    fflush(sFile);
+
+    sTotalWritten += taken;
+    sWindowIndex++;
+    sWindowStart = nowSeconds;
+}
+
+void profile_sample_tick(double nowSeconds) {
+    if (!sRunning || !sFile) { return; }
+    if (sWindowSeconds <= 0.0) { return; }
+    if (nowSeconds - sWindowStart < sWindowSeconds) { return; }
+    profile_sample_flush_window(nowSeconds);
+}
+
+void profile_sample_init(const char *path, double windowSeconds) {
     if (sRunning) { return; }
 
     const char *enabled = getenv("SM64_PROFILE_SAMPLE");
@@ -92,6 +167,8 @@ void profile_sample_init(void) {
     const char *hz = getenv("SM64_PROFILE_SAMPLE_HZ");
     if (hz && atoi(hz) > 0) { sHz = atoi(hz); }
     if (sHz > 1000) { sHz = 1000; }
+
+    sWindowSeconds = windowSeconds;
 
     sMainTid = (pid_t)syscall(SYS_gettid);
 
@@ -142,36 +219,38 @@ void profile_sample_init(void) {
         }
     }
 
-    if (sRunning) {
-        printf("[profile] sampling main thread at %d Hz\n", sHz);
-    } else {
+    if (!sRunning) {
         printf("[profile] could not start sampling timer\n");
+        return;
+    }
+
+    // Open now rather than at dump time: windows are appended as the session
+    // runs, so a process that is killed instead of exiting still leaves a usable
+    // file. The module map has to go in up front for the same reason -- it is
+    // what turns a pc back into a symbol, and it is fixed once the process is
+    // loaded (no dlopen happens after this point).
+    sFile = fopen(path, "w");
+    if (!sFile) {
+        printf("[profile] could not open '%s' for samples\n", path);
+        return;
+    }
+
+    fprintf(sFile, "# sm64coopdx sampled profile\n");
+    fprintf(sFile, "hz %d\n", sHz);
+    fprintf(sFile, "window_seconds %.3f\n", sWindowSeconds);
+
+    struct ProfileModuleWriter writer = { sFile, 0 };
+    dl_iterate_phdr(profile_sample_write_module, &writer);
+    fflush(sFile);
+
+    if (sWindowSeconds > 0.0) {
+        printf("[profile] sampling main thread at %d Hz, %.0fs windows\n", sHz, sWindowSeconds);
+    } else {
+        printf("[profile] sampling main thread at %d Hz, single window\n", sHz);
     }
 }
 
-struct ProfileModuleWriter {
-    FILE *f;
-    int index;
-};
-
-static int profile_sample_write_module(struct dl_phdr_info *info, size_t size, void *data) {
-    (void)size;
-    struct ProfileModuleWriter *w = (struct ProfileModuleWriter *)data;
-    const char *name = (info->dlpi_name && info->dlpi_name[0]) ? info->dlpi_name : "(main)";
-
-    for (int i = 0; i < info->dlpi_phnum; i++) {
-        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
-        if (ph->p_type != PT_LOAD || !(ph->p_flags & PF_X)) { continue; }
-        unsigned long start = (unsigned long)(info->dlpi_addr + ph->p_vaddr);
-        fprintf(w->f, "map 0x%lx 0x%lx 0x%lx %s\n",
-                start, start + (unsigned long)ph->p_memsz,
-                (unsigned long)info->dlpi_addr, name);
-    }
-    w->index++;
-    return 0;
-}
-
-void profile_sample_dump(const char *path) {
+void profile_sample_dump(double nowSeconds) {
     if (!sRunning) { return; }
 
     // stop sampling before walking the table
@@ -186,30 +265,16 @@ void profile_sample_dump(const char *path) {
     signal(SIGPROF, SIG_IGN);
     sRunning = false;
 
-    FILE *f = fopen(path, "w");
-    if (!f) {
-        printf("[profile] could not write samples to '%s'\n", path);
-        return;
-    }
+    if (!sFile) { return; }
 
-    fprintf(f, "# sm64coopdx sampled profile\n");
-    fprintf(f, "hz %d\n", sHz);
-    fprintf(f, "samples %u\n", sTaken);
-    fprintf(f, "dropped_other_thread %u\n", sOtherThread);
-    fprintf(f, "dropped_table_full %u\n", sOverflow);
-    fprintf(f, "dropped_no_pc %u\n", sNoPc);
+    // The last window is whatever has accumulated since the previous boundary,
+    // however short. Emitting it unconditionally keeps the invariant the report
+    // tool relies on: every sample taken belongs to exactly one window.
+    profile_sample_flush_window(nowSeconds);
 
-    // module map, so a pc in libmali/libSDL2 can be told apart from game code
-    struct ProfileModuleWriter writer = { f, 0 };
-    dl_iterate_phdr(profile_sample_write_module, &writer);
-
-    for (size_t i = 0; i < PROFILE_TABLE_SIZE; i++) {
-        if (sSlots[i].pc == 0) { continue; }
-        fprintf(f, "0x%lx %u\n", sSlots[i].pc, sSlots[i].count);
-    }
-
-    fclose(f);
-    printf("[profile] wrote %u samples to '%s'\n", sTaken, path);
+    fclose(sFile);
+    sFile = NULL;
+    printf("[profile] wrote %lu samples in %u windows\n", sTotalWritten, sWindowIndex);
 }
 
 #endif

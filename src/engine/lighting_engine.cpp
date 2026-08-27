@@ -24,9 +24,34 @@ struct LELight
     bool useSurfaceNormals;
 };
 
+// The per-vertex loops below walk this list once for every lit vertex, which on
+// run 12's flood session was the whole of a 15.4ms-per-frame renderer cost. Two
+// things about the old representation made that walk more expensive than the
+// arithmetic in it:
+//
+//   - it held LELight* into sLightPool, so each light was a dependent load into
+//     a separate cache line. On a Cortex-A35 (in-order, no L3) that miss cannot
+//     be hidden behind the handful of multiplies it feeds.
+//   - it recomputed radius*radius per light per vertex, and converted the u8
+//     colour to float per light per vertex.
+//
+// So keep a packed by-value copy instead, rebuilt lazily whenever the pool
+// changes. Being a copy rather than an alias is the whole point and also the
+// hazard: every mutator of a pooled light must mark it dirty, where the old
+// pointer list got that for free. le_set_light_pos(), le_set_light_color() and
+// le_set_light_use_surface_normals() did not previously mark anything, so they
+// gained a le_update_active_lights() along with this.
+struct LEActiveLight {
+    Vec3f pos;
+    f32   radius2;    // the loops only ever want the square
+    f32   intensity;
+    Vec3f color;      // pre-converted from the u8 Color
+    bool  useSurfaceNormals;
+};
+
 Color gLEAmbientColor = { 127, 127, 127 };
 static std::vector<LELight> sLightPool;
-static std::vector<LELight*> sActiveLights;
+static std::vector<LEActiveLight> sActiveLights;
 static s16 sLightID = -1;
 static enum LEMode sMode = LE_MODE_AFFECT_ALL_SHADED_AND_COLORED;
 static enum LEToneMapping sToneMapping = LE_TONE_MAPPING_WEIGHTED;
@@ -133,16 +158,67 @@ static void le_tone_map(Color out, Color inAmbient, Vec3f inColor, f32 weight) {
     }
 }
 
+// Rebuilding is O(pool), so it must not happen once per setter call: a mod that
+// moves N lights every frame would otherwise pay O(N^2) per frame. Mark instead,
+// and rebuild at most once before the next read.
+static bool sActiveLightsDirty = true;
+
 static void le_update_active_lights() {
+    sActiveLightsDirty = true;
+}
+
+static void le_rebuild_active_lights() {
+    sActiveLightsDirty = false;
     sActiveLights.clear();
     for (auto& light : sLightPool) {
         if (light.intensity > 0.0f && light.radius > 0.0f) {
-            sActiveLights.push_back(&light);
+            LEActiveLight active;
+            active.pos[0] = light.pos[0];
+            active.pos[1] = light.pos[1];
+            active.pos[2] = light.pos[2];
+            active.radius2 = light.radius * light.radius;
+            active.intensity = light.intensity;
+            active.color[0] = light.color[0];
+            active.color[1] = light.color[1];
+            active.color[2] = light.color[2];
+            active.useSurfaceNormals = light.useSurfaceNormals;
+            sActiveLights.push_back(active);
         }
     }
 }
 
-static inline OPTIMIZE_O3 void le_calculate_light_contribution(const LELight& light, Vec3f pos, Vec3f normal, f32 lightIntensityScalar, Vec3f outColor, f32& weight, u8& contribution) {
+// Called at the top of every read path. One predictable branch on a hot static,
+// which is nothing next to the loop it guards.
+static inline void le_sync_active_lights() {
+    if (sActiveLightsDirty) { le_rebuild_active_lights(); }
+}
+
+C_FIELD bool le_has_active_lights(void) {
+    le_sync_active_lights();
+    return !sActiveLights.empty();
+}
+
+// What le_calculate_lighting_color() and le_calculate_vertex_lighting() reduce
+// to when no light is in range: zero contribution, unit weight, tone map the
+// ambient. Split out so the renderer can take this path without first computing
+// the world-space position that the light loop -- and only the light loop --
+// needs. Must stay in step with the tone map calls in the two functions below.
+C_FIELD void le_calculate_ambient_color(VEC_OUT Color out) {
+    Vec3f color = { 0 };
+    le_tone_map(out, gLEAmbientColor, color, 1.0f);
+}
+
+C_FIELD void le_calculate_vertex_ambient_color(const Vtx_t* v, VEC_OUT Color out) {
+    Vec3f color = { 0 };
+    Color vtxAmbient = {
+        (u8)(v->cn[0] * (gLEAmbientColor[0] / 255.0f)),
+        (u8)(v->cn[1] * (gLEAmbientColor[1] / 255.0f)),
+        (u8)(v->cn[2] * (gLEAmbientColor[2] / 255.0f)),
+    };
+    le_tone_map(out, vtxAmbient, color, 1.0f);
+}
+
+static inline OPTIMIZE_O3 void le_calculate_light_contribution(const LEActiveLight& light, Vec3f pos, Vec3f normal, f32 lightIntensityScalar, Vec3f outColor, f32& weight, u8& contribution) {
     // vector to light
     f32 diffX = light.pos[0] - pos[0];
     f32 diffY = light.pos[1] - pos[1];
@@ -150,7 +226,7 @@ static inline OPTIMIZE_O3 void le_calculate_light_contribution(const LELight& li
 
     // squared distance check
     f32 dist2 = (diffX * diffX) + (diffY * diffY) + (diffZ * diffZ);
-    f32 radius2 = light.radius * light.radius;
+    f32 radius2 = light.radius2;
     if (dist2 > radius2 || dist2 <= 0) { return; }
 
     // attenuation & intensity
@@ -181,14 +257,15 @@ static inline OPTIMIZE_O3 void le_calculate_light_contribution(const LELight& li
 }
 
 C_FIELD OPTIMIZE_O3 void le_calculate_vertex_lighting(const Vtx_t* v, Vec3f pos, VEC_OUT Color out) {
+    le_sync_active_lights();
     // clear color
     Vec3f color = { 0 };
 
     // accumulate lighting
     f32 weight = 1.0f;
     u8 contribution = 0;
-    for (LELight* light : sActiveLights) {
-        le_calculate_light_contribution(*light, pos, NULL, 1.0f, color, weight, contribution);
+    for (const LEActiveLight& light : sActiveLights) {
+        le_calculate_light_contribution(light, pos, NULL, 1.0f, color, weight, contribution);
         if (contribution == sMaxLightsPerVertex) { break; }
     }
 
@@ -202,14 +279,15 @@ C_FIELD OPTIMIZE_O3 void le_calculate_vertex_lighting(const Vtx_t* v, Vec3f pos,
 }
 
 C_FIELD OPTIMIZE_O3 void le_calculate_lighting_color(Vec3f pos, VEC_OUT Color out, f32 lightIntensityScalar) {
+    le_sync_active_lights();
     // clear color
     Vec3f color = { 0 };
 
     // accumulate lighting
     f32 weight = 1.0f;
     u8 contribution = 0;
-    for (LELight* light : sActiveLights) {
-        le_calculate_light_contribution(*light, pos, NULL, lightIntensityScalar, color, weight, contribution);
+    for (const LEActiveLight& light : sActiveLights) {
+        le_calculate_light_contribution(light, pos, NULL, lightIntensityScalar, color, weight, contribution);
         if (contribution == sMaxLightsPerVertex) { break; }
     }
 
@@ -218,6 +296,7 @@ C_FIELD OPTIMIZE_O3 void le_calculate_lighting_color(Vec3f pos, VEC_OUT Color ou
 }
 
 C_FIELD OPTIMIZE_O3 void le_calculate_lighting_color_with_normal(Vec3f pos, Vec3f normal, VEC_OUT Color out, f32 lightIntensityScalar) {
+    le_sync_active_lights();
     // normalize normal
     if (normal) { vec3f_normalize(normal); }
 
@@ -227,8 +306,8 @@ C_FIELD OPTIMIZE_O3 void le_calculate_lighting_color_with_normal(Vec3f pos, Vec3
     // accumulate lighting
     f32 weight = 1.0f;
     u8 contribution = 0;
-    for (LELight* light : sActiveLights) {
-        le_calculate_light_contribution(*light, pos, normal, lightIntensityScalar, color, weight, contribution);
+    for (const LEActiveLight& light : sActiveLights) {
+        le_calculate_light_contribution(light, pos, normal, lightIntensityScalar, color, weight, contribution);
         if (contribution == sMaxLightsPerVertex) { break; }
     }
 
@@ -237,25 +316,26 @@ C_FIELD OPTIMIZE_O3 void le_calculate_lighting_color_with_normal(Vec3f pos, Vec3
 }
 
 C_FIELD void le_calculate_lighting_dir(Vec3f pos, VEC_OUT Vec3f out) {
+    le_sync_active_lights();
     Vec3f lightingDir = { 0, 0, 0 };
     s16 count = 1;
 
-    for (LELight* light : sActiveLights) {
-        f32 diffX = light->pos[0] - pos[0];
-        f32 diffY = light->pos[1] - pos[1];
-        f32 diffZ = light->pos[2] - pos[2];
+    for (const LEActiveLight& light : sActiveLights) {
+        f32 diffX = light.pos[0] - pos[0];
+        f32 diffY = light.pos[1] - pos[1];
+        f32 diffZ = light.pos[2] - pos[2];
         f32 dist = (diffX * diffX) + (diffY * diffY) + (diffZ * diffZ);
-        f32 radius = light->radius * light->radius;
+        f32 radius = light.radius2;
         if (dist > radius) { continue; }
 
         Vec3f dir = {
-            pos[0] - light->pos[0],
-            pos[1] - light->pos[1],
-            pos[2] - light->pos[2],
+            pos[0] - light.pos[0],
+            pos[1] - light.pos[1],
+            pos[2] - light.pos[2],
         };
         vec3f_normalize(dir);
 
-        f32 intensity = (1 - (dist / radius)) * light->intensity;
+        f32 intensity = (1 - (dist / radius)) * light.intensity;
         lightingDir[0] += dir[0] * intensity;
         lightingDir[1] += dir[1] * intensity;
         lightingDir[2] += dir[2] * intensity;
@@ -353,6 +433,7 @@ C_FIELD void le_set_light_pos(s16 id, f32 x, f32 y, f32 z) {
         light->pos[0] = x;
         light->pos[1] = y;
         light->pos[2] = z;
+        le_update_active_lights();
     }
 }
 
@@ -371,6 +452,7 @@ C_FIELD void le_set_light_color(s16 id, u8 r, u8 g, u8 b) {
         light->color[0] = r;
         light->color[1] = g;
         light->color[2] = b;
+        le_update_active_lights();
     }
 }
 
@@ -429,12 +511,16 @@ C_FIELD void le_set_light_use_surface_normals(s16 id, bool useSurfaceNormals) {
 
     if (auto* light = le_find_light(id)) {
         light->useSurfaceNormals = useSurfaceNormals;
+        le_update_active_lights();
     }
 }
 
 void le_clear(void) {
     sLightPool.clear();
     sActiveLights.clear();
+    // Both are empty, so a rebuild would be a no-op either way; mark anyway so
+    // the "pool changed => dirty" rule has no exception to remember.
+    le_update_active_lights();
     sLightID = -1;
 
     color_set(gLEAmbientColor, 127, 127, 127);

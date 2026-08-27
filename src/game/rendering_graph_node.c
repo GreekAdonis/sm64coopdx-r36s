@@ -1783,6 +1783,7 @@ static void geo_process_object(struct Object *node) {
             }
 
         } else {
+            PROFILE_ADD(objsCulled, 1);
             node->header.gfx.prevThrowMatrixTimestamp = 0;
             node->header.gfx.prevTimestamp = 0;
             node->header.gfx.prevScaleTimestamp = 0;

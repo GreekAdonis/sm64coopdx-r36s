@@ -41,11 +41,20 @@ bool first_person_check_cancels(struct MarioState *m) {
 
     if (gLuaLoadingMod != NULL) { return false; }
 
-    struct Object *bowser = find_object_with_behavior(smlua_override_behavior(bhvBowser));
-    if ((gCurrLevelNum == LEVEL_BOWSER_1 || gCurrLevelNum == LEVEL_BOWSER_2 || gCurrLevelNum == LEVEL_BOWSER_3) &&
-        bowser != NULL &&
-        (bowser->oAction == 5 || bowser->oAction == 6)) {
-        return true;
+    // Test the level before looking for Bowser, not after.
+    //
+    // The level condition was already required for this branch, so gating the
+    // search on it changes nothing -- but find_object_with_behavior() walks a
+    // whole object list, and this runs every frame in every level. Objects are
+    // 2432 bytes with `next` and `behavior` 104 bytes apart, so each step of that
+    // walk touches two cache lines: run 15's 1,150-object room was paying ~2,300
+    // line fetches per call to conclude that a level without Bowser in it does
+    // not contain Bowser.
+    if (gCurrLevelNum == LEVEL_BOWSER_1 || gCurrLevelNum == LEVEL_BOWSER_2 || gCurrLevelNum == LEVEL_BOWSER_3) {
+        struct Object *bowser = find_object_with_behavior(smlua_override_behavior(bhvBowser));
+        if (bowser != NULL && (bowser->oAction == 5 || bowser->oAction == 6)) {
+            return true;
+        }
     }
 
     return false;

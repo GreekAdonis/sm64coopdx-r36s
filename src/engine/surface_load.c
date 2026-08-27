@@ -29,6 +29,35 @@ SpatialPartitionCell gStaticSurfacePartition[NUM_CELLS][NUM_CELLS];
 SpatialPartitionCell gDynamicSurfacePartition[NUM_CELLS][NUM_CELLS];
 
 /**
+ * Last node of each wall cell list, so appending does not have to walk to it.
+ *
+ * add_surface_to_cell() places a surface by walking from the head to the first
+ * node with a strictly smaller priority. For walls that walk can never stop
+ * early: their sortDir is 0, so every priority in the comparison is 0,
+ * `surfacePriority > priority` is never true, and the loop runs the full length
+ * of the list before appending -- O(n^2) to fill a cell, with two dependent
+ * loads per step on a core with no L3.
+ *
+ * Run 15 measured the consequence in a room holding ~1,150 collision objects:
+ * add_surface was 32% of all main-thread CPU (18.9ms of a 55.7ms frame), and as
+ * the objects packed into fewer cells the cost per object rose 64% while the
+ * object count rose 2%. Cubes are 8 wall triangles out of 12, so the case with
+ * no early exit is also the common one.
+ *
+ * NULL means "unknown" rather than "empty", which is what makes this safe: the
+ * fast path is simply skipped and the walk finds the answer, then repairs the
+ * tail if it appended. So removal paths can invalidate by storing NULL without
+ * having to reason about which node moved where.
+ *
+ * Only the wall lists are tracked. The sorted lists cannot use the shortcut (see
+ * add_surface_to_cell) so a tail kept for them would be written and never read,
+ * which is a store per append into a cache line nothing ever loads. At the 64x64
+ * cells this build uses, one array per partition is also 96KB rather than 288KB.
+ */
+static struct SurfaceNode *sStaticWallTail[NUM_CELLS][NUM_CELLS];
+static struct SurfaceNode *sDynamicWallTail[NUM_CELLS][NUM_CELLS];
+
+/**
  * The total number of surface nodes allocated (a node is allocated for each
  * spatial partition cell that a surface intersects).
  */
@@ -131,7 +160,7 @@ static struct StaticObjectCollision *alloc_static_object_collision(void) {
 /**
  * Iterates through the entire partition, clearing the surfaces.
  */
-static void clear_spatial_partition(SpatialPartitionCell *cells) {
+static void clear_spatial_partition(SpatialPartitionCell *cells, struct SurfaceNode **wallTails) {
     register s32 i = NUM_CELLS * NUM_CELLS;
 
     while (i--) {
@@ -139,15 +168,29 @@ static void clear_spatial_partition(SpatialPartitionCell *cells) {
         (*cells)[SPATIAL_PARTITION_CEILS].next = NULL;
         (*cells)[SPATIAL_PARTITION_WALLS].next = NULL;
 
+        *wallTails = NULL;
+
         cells++;
+        wallTails++;
     }
+}
+
+/**
+ * Forgets every cached tail, so the next insert into any cell walks its list and
+ * rediscovers it. Used by paths that unlink nodes rather than clearing whole
+ * lists -- see remove_surface_from_partition(), which both relocates nodes via
+ * swap-and-pop and can unlink the tail itself.
+ */
+static void invalidate_spatial_partition_tails(void) {
+    memset(sStaticWallTail, 0, sizeof(sStaticWallTail));
+    memset(sDynamicWallTail, 0, sizeof(sDynamicWallTail));
 }
 
 /**
  * Clears the static (level) surface partitions for new use.
  */
 static void clear_static_surfaces(void) {
-    clear_spatial_partition(&gStaticSurfacePartition[0][0]);
+    clear_spatial_partition(&gStaticSurfacePartition[0][0], &sStaticWallTail[0][0]);
 
     // Invalidate Lua CObjects for surfaces that are about to be recycled
     if (sSurfaceStaticPool) {
@@ -217,10 +260,40 @@ static void add_surface_to_cell(s16 cellX, s16 cellZ, struct Surface *surface) {
 
     newNode->surface = surface;
 
-    if (surface->poolType == SURFACE_POOL_DYNAMIC) {
+    bool isDynamicPool = (surface->poolType == SURFACE_POOL_DYNAMIC);
+    struct SurfaceNode **tail = NULL;
+
+    if (isDynamicPool) {
         list = &gDynamicSurfacePartition[cellZ][cellX][listIndex];
     } else {
         list = &gStaticSurfacePartition[cellZ][cellX][listIndex];
+    }
+    if (listIndex == SPATIAL_PARTITION_WALLS) {
+        tail = isDynamicPool ? &sDynamicWallTail[cellZ][cellX]
+                             : &sStaticWallTail[cellZ][cellX];
+    }
+
+    // Walls (sortDir 0) are the only list this shortcut is applied to, and the
+    // restriction is a correctness one rather than caution.
+    //
+    // Every term in the comparison below is multiplied by sortDir, so at 0 both
+    // surfacePriority and priority are 0 whichever field fed them, the loop's
+    // `surfacePriority > priority` is never true, and the insert is always an
+    // append. Appending via a remembered tail is therefore exactly what the walk
+    // would have done -- same node, same order, in every configuration.
+    //
+    // The sorted lists cannot borrow the same argument. surfacePriority is taken
+    // from upperY when gLevelValues.fixCollisionBugs is set, while the loop
+    // always compares against vertex1[1], so the two keys disagree and the list
+    // is not reliably ordered by the one being tested. "The tail holds the
+    // minimum" would not hold, and a node in the middle could be the real
+    // insertion point. They keep the walk -- which already exits early, and which
+    // was never where the time went.
+    if (tail != NULL && *tail != NULL) {
+        newNode->next = NULL;
+        (*tail)->next = newNode;
+        *tail = newNode;
+        return;
     }
 
     // Loop until we find the appropriate place for the surface in the list.
@@ -236,6 +309,12 @@ static void add_surface_to_cell(s16 cellX, s16 cellZ, struct Surface *surface) {
 
     newNode->next = list->next;
     list->next = newNode;
+
+    // Reached the end after all -- the list was empty, or its tail had been
+    // invalidated. Record it so the next append into this cell skips the walk.
+    if (tail != NULL && newNode->next == NULL) {
+        *tail = newNode;
+    }
 }
 
 /**
@@ -418,6 +497,14 @@ void remove_surface_from_partition(struct Surface *surface) {
             }
         }
     }
+
+    // Unlinking can remove the node a tail points at, and the swap-and-pop above
+    // relocates surviving nodes on top of removed slots, so any cached tail may
+    // now be stale or dangling. Drop them all; the next insert into a cell walks
+    // its list and repairs its own. Cheaper than the full partition sweep this
+    // function has already done, and this path only runs when a mod deletes or
+    // moves a surface, never per frame.
+    invalidate_spatial_partition_tails();
 }
 
 /**
@@ -857,7 +944,7 @@ void clear_dynamic_surfaces(void) {
     gSurfaceNodesAllocated = (sSurfaceStaticNodePool ? sSurfaceStaticNodePool->count : 0)
                            + (sSurfaceSOCNodePool    ? sSurfaceSOCNodePool->count    : 0);
 
-    clear_spatial_partition(&gDynamicSurfacePartition[0][0]);
+    clear_spatial_partition(&gDynamicSurfacePartition[0][0], &sDynamicWallTail[0][0]);
 
     for (u16 i = 0; i < OBJECT_POOL_CAPACITY; i++) {
         gObjectPool[i].numSurfaces = 0;

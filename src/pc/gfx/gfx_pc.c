@@ -292,10 +292,24 @@ void ext_gfx_run_dl(Gfx* cmd);
     gfx_flush(); \
 } while (0)
 
+// As FLUSH_FOR, but also records whether the split happened in a pass whose draw
+// order is free to change. See the drawsOpaque/flushTexOpaque comment in
+// profile_log.h for why Z_UPD is the right test.
+#define FLUSH_FOR_SPLIT(_field, _opaqueField, _blendField) do { \
+    if (buf_vbo_len > 0) { \
+        PROFILE_ADD(_field, 1); \
+        if ((rdp.other_mode_l & Z_UPD) == Z_UPD) { PROFILE_ADD(_opaqueField, 1); } \
+        else                                     { PROFILE_ADD(_blendField, 1); } \
+    } \
+    gfx_flush(); \
+} while (0)
+
 static void gfx_flush(void) {
     if (buf_vbo_len > 0) {
         PROFILE_ADD(drawCalls, 1);
         PROFILE_ADD(tris, buf_vbo_num_tris);
+        if ((rdp.other_mode_l & Z_UPD) == Z_UPD) { PROFILE_ADD(drawsOpaque, 1); }
+        else                                     { PROFILE_ADD(drawsBlend, 1); }
         gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
         buf_vbo_len = 0;
         buf_vbo_num_tris = 0;
@@ -924,8 +938,32 @@ static void OPTIMIZE_O3 gfx_sp_vertex(size_t n_vertices, size_t dest_index, cons
     // Loop-invariant work hoisted out of the per-vertex loop below. None of this
     // depends on the vertex index, but all of it used to be recomputed for every
     // single vertex -- including a function call to le_get_mode().
+    const enum LEMode leMode = le_get_mode();
     const bool affectAllVertexColored =
-        (le_get_mode() == LE_MODE_AFFECT_ALL_SHADED_AND_COLORED && luaVertexColor);
+        (leMode == LE_MODE_AFFECT_ALL_SHADED_AND_COLORED && luaVertexColor);
+
+    // The lighting engine's two branch predicates depend only on call-scope
+    // state -- whether LE is on, its mode, the geometry mode, and luaVertexColor
+    // -- yet each vertex was re-evaluating them, which on run 12's flood session
+    // meant two le_is_enabled() calls and an le_get_mode() call per vertex just
+    // to decide whether to do any lighting at all.
+    const bool leEnabled = le_is_enabled();
+    const bool leShadedPath = leEnabled && luaVertexColor &&
+        ((leMode != LE_MODE_AFFECT_ONLY_GEOMETRY_MODE) || (rsp.geometry_mode & G_LIGHTING_ENGINE_EXT));
+    const bool leColoredPath = leEnabled && !(rsp.geometry_mode & G_LIGHT_MAP_EXT) &&
+        (affectAllVertexColored || (rsp.geometry_mode & G_LIGHTING_ENGINE_EXT));
+    const bool leMultiplicative =
+        affectAllVertexColored && !(rsp.geometry_mode & G_LIGHTING_ENGINE_EXT);
+
+    // With no active lights every le_calculate_* call collapses to a tone map of
+    // the ambient colour, which does not depend on the vertex position. So the
+    // world-space transform feeding it -- a 3x3 matrix multiply per vertex, plus
+    // a normalise on the shaded path -- is pure waste in that case. A room with
+    // LE enabled for its ambient tint but no point lights is the common shape.
+    const bool leHasLights = (leShadedPath || leColoredPath) && le_has_active_lights();
+
+    // Ambient is read three times per lit vertex off a global; hoist the load.
+    const Color leAmbient = { gLEAmbientColor[0], gLEAmbientColor[1], gLEAmbientColor[2] };
 
     float baseR = 0, baseG = 0, baseB = 0;
 
@@ -1091,50 +1129,64 @@ static void OPTIMIZE_O3 gfx_sp_vertex(size_t n_vertices, size_t dest_index, cons
             }
 
             // if lighting engine is enabled and either we want to affect all shaded surfaces or the lighting engine geometry mode is on
-            if (le_is_enabled() && luaVertexColor && ((le_get_mode() != LE_MODE_AFFECT_ONLY_GEOMETRY_MODE) || (rsp.geometry_mode & G_LIGHTING_ENGINE_EXT))) {
-                Color color = { gLEAmbientColor[0], gLEAmbientColor[1], gLEAmbientColor[2] };
+            if (leShadedPath) {
+                Color color = { leAmbient[0], leAmbient[1], leAmbient[2] };
 
-                Vec3f vpos    = { v->ob[0], v->ob[1], v->ob[2] };
-                Vec3f vnormal = { nx, ny, nz };
+                if (leHasLights) {
+                    Vec3f vpos    = { v->ob[0], v->ob[1], v->ob[2] };
+                    Vec3f vnormal = { nx, ny, nz };
 
-                CTX_BEGIN(CTX_LIGHTING);
+                    CTX_BEGIN(CTX_LIGHTING);
 
-                // transform vpos and vnormal to world space
-                gfx_local_to_world_space(vpos, vnormal);
+                    // transform vpos and vnormal to world space
+                    gfx_local_to_world_space(vpos, vnormal);
 
-                le_calculate_lighting_color_with_normal(vpos, vnormal, color, 1.0f);
+                    le_calculate_lighting_color_with_normal(vpos, vnormal, color, 1.0f);
 
-                CTX_END(CTX_LIGHTING);
+                    CTX_END(CTX_LIGHTING);
+                } else {
+                    CTX_BEGIN(CTX_LIGHTING);
+                    le_calculate_ambient_color(color);
+                    CTX_END(CTX_LIGHTING);
+                }
 
                 d->color.r *= color[0] / 255.0f;
                 d->color.g *= color[1] / 255.0f;
                 d->color.b *= color[2] / 255.0f;
             }
         // if lighting engine is enabled and we should affect all vertex colored surfaces or the lighting engine geometry mode is on
-        } else if (le_is_enabled() && !(rsp.geometry_mode & G_LIGHT_MAP_EXT) && (affectAllVertexColored || (rsp.geometry_mode & G_LIGHTING_ENGINE_EXT))) {
-            Color color = { gLEAmbientColor[0], gLEAmbientColor[1], gLEAmbientColor[2] };
-
-            Vec3f vpos = { v->ob[0], v->ob[1], v->ob[2] };
+        } else if (leColoredPath) {
+            Color color = { leAmbient[0], leAmbient[1], leAmbient[2] };
 
             CTX_BEGIN(CTX_LIGHTING);
-
-            // transform vpos to world space
-            gfx_local_to_world_space(vpos, NULL);
 
             // do multiplication based lighting instead of additive based lighting if we're not using the lighting engine geometry mode,
             // this is my compromise for retaining vertex colors vs lighting up darker surfaces.
             // if retaining color is the most important like on a red coin, don't use the lighting engine geometry mode.
             // if lighting up darker surfaces like in a map with prebaked lighting is the most important, use the lighting engine geometry mode.
-            if (affectAllVertexColored && !(rsp.geometry_mode & G_LIGHTING_ENGINE_EXT)) {
-                le_calculate_lighting_color(vpos, color, 1.0f);
+            if (leHasLights) {
+                Vec3f vpos = { v->ob[0], v->ob[1], v->ob[2] };
+
+                // transform vpos to world space
+                gfx_local_to_world_space(vpos, NULL);
+
+                if (leMultiplicative) {
+                    le_calculate_lighting_color(vpos, color, 1.0f);
+                } else {
+                    le_calculate_vertex_lighting(v, vpos, color);
+                }
             } else {
-                le_calculate_vertex_lighting(v, vpos, color);
+                if (leMultiplicative) {
+                    le_calculate_ambient_color(color);
+                } else {
+                    le_calculate_vertex_ambient_color(v, color);
+                }
             }
 
             CTX_END(CTX_LIGHTING);
 
             // combine the colors
-            if (affectAllVertexColored && !(rsp.geometry_mode & G_LIGHTING_ENGINE_EXT)) {
+            if (leMultiplicative) {
                 d->color.r = (v->cn[0] * color[0] / 255.0f) * vertexColorCached[0];
                 d->color.g = (v->cn[1] * color[1] / 255.0f) * vertexColorCached[1];
                 d->color.b = (v->cn[2] * color[2] / 255.0f) * vertexColorCached[2];
@@ -1395,7 +1447,7 @@ static void OPTIMIZE_O3 gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t 
                     // Nothing to do, and crucially nothing to flush for.
                     PROFILE_ADD(texImportSkips, 1);
                 } else {
-                    FLUSH_FOR(flushTexture);
+                    FLUSH_FOR_SPLIT(flushTexture, flushTexOpaque, flushTexBlend);
                     import_texture(i);
                     gfx_texture_import_remember(i);
                 }

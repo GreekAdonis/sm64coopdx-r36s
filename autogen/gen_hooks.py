@@ -130,12 +130,19 @@ SMLUA_TYPES = {
         }}
 """
     },
+    # gMarioStates comes from a registry reference taken once in
+    # smlua_cobject_init_globals(), not from lua_getglobal() on every callback:
+    # this runs inside the dispatch loop, and a room with many mods reaches
+    # hundreds of MarioState hook invocations per frame. Two raw array indexes
+    # instead of a string hash into _G plus a metatable-aware lua_gettable.
+    # Still indexes the live table, so a mod reassigning gMarioStates[i] is seen.
+    # Pushes exactly one value, as the old form did, so stack discipline and
+    # every early-return path in the templates below are unchanged.
     "structMarioState*": {
 "input": """
         // push {name}
-        lua_getglobal(L, "gMarioStates");
-        lua_pushinteger(L, {name}->playerIndex);
-        lua_gettable(L, -2);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, gSmLuaMarioStatesRef);
+        lua_rawgeti(L, -1, {name}->playerIndex);
         lua_remove(L, -2);
 """
     },

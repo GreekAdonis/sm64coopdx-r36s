@@ -81,21 +81,63 @@ u16 gProfileCurHookType = HOOK_MAX;
 static u32 sHookTypeCalls[PROFILE_HOOK_SLOTS] = { 0 };
 static f64 sHookTypeUs[PROFILE_HOOK_SLOTS] = { 0 };
 
-void profile_dump_hook_types(const char* path) {
-    FILE* f = fopen(path, "w");
-    if (!f) { return; }
+// Written as time windows, for the same reason the sampled profile is (see
+// profile_sample.h): run 12's flood section was 30 seconds of a 1957-second
+// session, and a single whole-session total could not say whether the 69.5ms
+// per frame it spent in HOOK_UPDATE was one mod misbehaving or ten mods each
+// doing their share. Per-window totals can, because the flood windows can be
+// read on their own.
+//
+// One `window` line then the rows accumulated since the last one; the counters
+// reset at each boundary so a row belongs to exactly one window.
+static double sHookWindowStart = 0.0;
+static u32 sHookWindowIndex = 0;
+static FILE* sHookFile = NULL;
 
-    fprintf(f, "hook,calls,us\n");
+static void profile_hook_write_window(double nowSeconds) {
+    if (!sHookFile) { return; }
+
+    fprintf(sHookFile, "window %u %.3f %.3f\n",
+            sHookWindowIndex, sHookWindowStart, nowSeconds);
+
     for (u32 i = 0; i < (u32)PROFILE_HOOK_SLOTS; i++) {
         if (sHookTypeCalls[i] == 0) { continue; }
         const char* name;
         if (i == (u32)PROFILE_HOOK_BEHAVIOR) { name = "(behaviour callback)"; }
         else if (i == (u32)HOOK_MAX)         { name = "(untagged)"; }
         else                                 { name = sLuaHookedEventTypeName[i]; }
-        fprintf(f, "%s,%u,%.0f\n", name ? name : "(unknown)", sHookTypeCalls[i], sHookTypeUs[i]);
+        fprintf(sHookFile, "%s,%u,%.0f\n", name ? name : "(unknown)",
+                sHookTypeCalls[i], sHookTypeUs[i]);
+        sHookTypeCalls[i] = 0;
+        sHookTypeUs[i] = 0.0;
     }
 
-    fclose(f);
+    fflush(sHookFile);
+    sHookWindowIndex++;
+    sHookWindowStart = nowSeconds;
+}
+
+void profile_hook_types_tick(const char* path, double nowSeconds, double windowSeconds) {
+    if (!sHookFile) {
+        sHookFile = fopen(path, "w");
+        if (!sHookFile) { return; }
+        fprintf(sHookFile, "hook,calls,us\n");
+    }
+    if (windowSeconds <= 0.0) { return; }
+    if (nowSeconds - sHookWindowStart < windowSeconds) { return; }
+    profile_hook_write_window(nowSeconds);
+}
+
+void profile_dump_hook_types(const char* path, double nowSeconds) {
+    if (!sHookFile) {
+        sHookFile = fopen(path, "w");
+        if (!sHookFile) { return; }
+        fprintf(sHookFile, "hook,calls,us\n");
+    }
+
+    profile_hook_write_window(nowSeconds);
+    fclose(sHookFile);
+    sHookFile = NULL;
 }
 
 #endif

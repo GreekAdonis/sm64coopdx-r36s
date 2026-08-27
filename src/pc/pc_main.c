@@ -400,6 +400,36 @@ static bool should_skip_render(void) {
     const f64 iterTime = (sLastDeadlineCheck > 0.0) ? (now - sLastDeadlineCheck) : sFrameTime;
     sLastDeadlineCheck = now;
 
+    // A single enormous iteration is a hitch, not a trend, and dropping renders
+    // could not have prevented it -- so do not charge the client for it.
+    //
+    // Run 18 recorded two: 7.6 seconds on a server join and 1.4 seconds in the
+    // middle of ordinary play, both spent inside network_update() and both
+    // mostly *blocked* rather than computing (the sampler runs on the thread's
+    // CPU clock, and the window holding the join showed 55.7% CPU against wall).
+    // Render skipping recovers CPU time. It cannot recover time the process
+    // spent waiting on a socket, so debt accrued that way is unpayable by the
+    // only mechanism this policy has.
+    //
+    // Left alone the lateness clamps to the debt ceiling and stays pinned there:
+    // after both stalls simlag sat at exactly 100ms for dozens of frames, which
+    // is the ceiling reporting itself. What happened next depended on where the
+    // cost estimate landed, and both outcomes were wrong -- either the policy
+    // skipped renders to pay a debt no amount of skipping could clear, or the
+    // stall had poisoned sSimOnlyCost badly enough that render_skip_is_futile()
+    // suppressed skipping for the two seconds the estimate took to decay back.
+    //
+    // Resetting is what RENDER_SKIP_GIVE_UP_SECONDS was for; that test is dead
+    // because the clamp below bounds `behind` well under a second before it is
+    // ever reached. This restores the intent at a threshold that can fire.
+    if (configRenderSkipStallMs != 0 && iterTime > (configRenderSkipStallMs / 1000.0)) {
+        sSimDeadline = now;
+        sRenderSkipRun = 0;
+        sRenderSkipping = false;
+        gSimLagSeconds = 0.0;
+        return false;
+    }
+
     // One iteration is one simulation tick, so the deadline advances by exactly
     // one tick whether or not we met it. Wall clock running past it is the
     // amount we are behind, and it accumulates fractional overruns that counting
@@ -497,7 +527,25 @@ void produce_interpolation_frames_and_delay(void) {
     if (sSimOnlyStart > 0.0) {
         const f64 simOnly = clock_elapsed_f64() - sSimOnlyStart;
         sSimOnlyStart = 0.0;
-        if (sSimOnlyCost <= 0.0) {
+        // A hitch says nothing about what a tick costs, so it does not get a vote.
+        //
+        // This has to test the sample in front of it rather than a flag set by
+        // should_skip_render(), which is where the first attempt went wrong.
+        // That function runs before sSimOnlyStart is taken for the frame and
+        // derives its iterTime from the *previous* iteration, so a flag set there
+        // discarded the following frame's sample -- while the stall's own sample
+        // had already been folded in one frame earlier. It suppressed the
+        // recovery and left the poisoning untouched, which is precisely backwards.
+        //
+        // Run 19 shows what that costs: a 327ms level-load frame drove the
+        // estimate to 344ms, and at alpha 0.05 it needed four seconds to decay
+        // back under budget. For all four, render_skip_is_futile() saw a
+        // hopeless simulation and refused to skip anything, so frames ran 62-82ms
+        // at roughly 47% speed -- the load failing to self-correct.
+        const f64 stallCutoff = configRenderSkipStallMs / 1000.0;
+        if (configRenderSkipStallMs != 0 && simOnly > stallCutoff) {
+            // leave the estimate alone
+        } else if (sSimOnlyCost <= 0.0) {
             sSimOnlyCost = simOnly;
         } else {
             sSimOnlyCost += (simOnly - sSimOnlyCost) * RENDER_SKIP_SIM_COST_ALPHA;
@@ -583,7 +631,24 @@ void produce_interpolation_frames_and_delay(void) {
         }
 
         sDrawnFrames++;
-        if (shouldDelay) { numFramesToDraw--; }
+
+        // Unconditional, where this used to be guarded by `if (shouldDelay)`.
+        //
+        // The guard made the `numFramesToDraw > 0` half of the loop condition
+        // dead under vsync -- which is the default -- because the vsync branch
+        // above sets shouldDelay to false. Nothing then decremented the counter,
+        // so the only exit was the wall-clock test, and since that test runs
+        // *after* a whole image has been drawn the loop would commit to another
+        // ~20ms subframe whenever any budget at all remained.
+        //
+        // Run 14 measured the result: 1,183 frames drew between 3 and 7
+        // interpolated images for a single game tick, averaging 89ms against a
+        // 33.3ms budget with only 10.8ms of actual game work in them. That is
+        // 60% of every frame over two ticks in the whole session.
+        //
+        // The delay path is unaffected: it already decremented here, and the
+        // expectedTime division above reads numFramesToDraw before this line.
+        numFramesToDraw--;
     } while ((curTime = clock_elapsed_f64()) < targetTime && numFramesToDraw > 0);
 
     // compute and update the frame rate every second
@@ -596,6 +661,31 @@ void produce_interpolation_frames_and_delay(void) {
         sFrameTimeStart = curTime;
     } else {
         sFrameTimeStart += sFrameTime;
+    }
+
+    // A skipped render leaves the schedule anchored in the future, which the
+    // next frame then spends.
+    //
+    // The branch above advances the anchor by a whole tick whatever actually
+    // happened. That is right for a frame that rendered, because the swap it
+    // blocked on is what consumed the tick. A skipped frame blocks on nothing
+    // and costs about 11ms, so the anchor ends up ~22ms ahead of wall clock --
+    // and the next frame's targetTime is therefore ~55ms out, which the loop
+    // above dutifully fills with extra subframes.
+    //
+    // That is the oscillation run 14 recorded: 67% of the frames that drew three
+    // or more images came immediately after a skipped render, against a 5.6%
+    // base rate -- a 12x lift -- and the frame after a skip ran p90 93.2ms
+    // against 42.2ms overall. Skip, over-draw, fall behind, skip again.
+    //
+    // It also pins interpolation. With vsync, delta is computed from
+    // (curTime - sFrameTimeStart); an anchor in the future makes that negative,
+    // so it clamps to 0 and the extra images all redraw the same instant.
+    //
+    // Refusing to bank time we did not spend costs nothing when the client is
+    // keeping up, because a rendered frame's anchor never runs ahead.
+    if (skipRender && sFrameTimeStart > curTime) {
+        sFrameTimeStart = curTime;
     }
 
     gRenderingInterpolated = false;

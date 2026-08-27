@@ -111,6 +111,12 @@ unsigned int configRenderSkipEnterMs              = 66; // start dropping at 2 t
 unsigned int configRenderSkipExitMs               = 16; // stop once back within half a tick
 unsigned int configRenderSkipMax                  = 2;  // most consecutive drops; 0 disables
 unsigned int configRenderSkipHud                  = 1;  // also skip HUD Lua hooks on a dropped render
+// An iteration longer than this is treated as a hitch rather than lateness to be
+// paid off -- see should_skip_render(). Default off: run 19 showed it firing on
+// only 0.52% of frames, so it was not implicated in that session's slowdown, but
+// it has never been validated against a controlled A/B either. Set it to 133 (four
+// ticks) to test it; 0 keeps the pre-existing behaviour.
+unsigned int configRenderSkipStallMs              = 0;
 unsigned int configRenderSkipFutilePct            = 100; // stop dropping once a sim-only tick costs this % of budget; 0 disables
 unsigned int configLuaSkipUnconnectedPlayers      = 1;  // don't run per-Mario hooks for empty player slots
 unsigned int configLuaGcPause                     = 0;  // Lua GC pause %, 0 = leave at the interpreter default
@@ -312,6 +318,7 @@ static const struct ConfigOption options[] = {
     {.name = "render_skip_max",                .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipMax},
     {.name = "render_skip_hud",                .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipHud},
     {.name = "render_skip_futile_pct",         .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipFutilePct},
+    {.name = "render_skip_stall_ms",           .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipStallMs},
     {.name = "lua_skip_unconnected_players",   .type = CONFIG_TYPE_UINT, .uintValue = &configLuaSkipUnconnectedPlayers},
     {.name = "lua_gc_pause",                   .type = CONFIG_TYPE_UINT, .uintValue = &configLuaGcPause},
     {.name = "lua_gc_stepmul",                 .type = CONFIG_TYPE_UINT, .uintValue = &configLuaGcStepMul},
@@ -887,6 +894,12 @@ NEXT_OPTION:
     if (configRenderSkipFutilePct != 0 && configRenderSkipFutilePct < 100) {
         configRenderSkipFutilePct = 100;
     }
+    // Below two ticks this would fire on ordinary heavy frames and the policy
+    // would never accumulate the debt it exists to act on. 0 disables it.
+    if (configRenderSkipStallMs != 0 && configRenderSkipStallMs < 67) {
+        configRenderSkipStallMs = 67;
+    }
+
     // Lua's own minimum for both is 0; these are percentages and the interpreter
     // defaults are 200. Anything under 100 collects harder than the default,
     // which is the wrong direction for a device that is short of CPU.

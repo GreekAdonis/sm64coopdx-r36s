@@ -597,7 +597,9 @@ void network_update(void) {
 
     // receive packets
     if (gNetworkSystem != NULL) {
+        CTX_BEGIN_TIMED(CTX_NET_RECV);
         gNetworkSystem->update();
+        CTX_END_TIMED(CTX_NET_RECV);
     }
 
     // update reliable and ordered packets

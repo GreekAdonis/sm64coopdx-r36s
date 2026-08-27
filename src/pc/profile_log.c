@@ -29,6 +29,13 @@ static char  sHookPath[512] = { 0 };
 static char  sIoBuf[1 << 16];
 static u64   sFrame = 0;
 static f64   sStartTime = 0;
+
+// Seconds per sampled-profile / hook-attribution window. Short enough that a bad
+// patch can be isolated, long enough that a whole session's windows stay a small
+// file. 0 (SM64_PROFILE_SAMPLE_WINDOW=0/off) collapses both back to one
+// whole-session window, which is what every run before 12 produced.
+#define PROFILE_DEFAULT_WINDOW_S 30.0
+static f64   sWindowSeconds = PROFILE_DEFAULT_WINDOW_S;
 static u32   sSinceFlush = 0;
 
 // microseconds spent in a context during the frame that just ended
@@ -100,14 +107,16 @@ void profile_log_init(void) {
 
     fprintf(sFile,
             "frame,time_s,level,area,act,players,objects,subframes,"
-            "us_total,us_net,us_netcodec,us_netsocket,us_interp,us_game,us_levelscript,us_objects,us_geo,"
+            "us_total,us_net,us_netcodec,us_netsocket,us_netrecv,"
+            "us_interp,us_game,us_levelscript,us_objects,us_geo,"
             "us_smlua,us_hook,us_audio,us_render,us_gfxdl,us_lighting,us_texupload,"
             "us_swap,us_delay,"
             "draws,tris,verts,triscliprej,triscullrej,"
             "texloads,texbytes,texflushes,binds,bindskips,impskips,shaders,"
             "fldepth,flviewport,flshader,flalpha,fltexture,flsampler,flfull,flcomb,"
-            "hookcalls,hookbhv,fieldgets,fieldsets,codeccomp,codecdecomp,"
-            "objsdrawn,dlnodes,dldistinct,renderskips,simlag_us,simonly_us,"
+            "drawsopaque,drawsblend,fltexopaque,fltexblend,"
+            "hookcalls,hookbhv,fieldgets,fieldsets,fieldmemo,codeccomp,codecdecomp,"
+            "objsdrawn,objsculled,objsculledsize,dlnodes,dldistinct,renderskips,simlag_us,simonly_us,"
             "mario_x,mario_y,mario_z\n");
 
     sStartTime = clock_elapsed_f64();
@@ -125,7 +134,17 @@ void profile_log_init(void) {
     signal(SIGHUP, profile_log_signal);
     signal(SIGQUIT, profile_log_signal);
 
-    profile_sample_init();
+    const char *window = getenv("SM64_PROFILE_SAMPLE_WINDOW");
+    if (window && *window) {
+        if (!strcmp(window, "0") || !strcmp(window, "off")) {
+            sWindowSeconds = 0.0;
+        } else {
+            f64 w = atof(window);
+            if (w > 0.0) { sWindowSeconds = w; }
+        }
+    }
+
+    profile_sample_init(sSamplePath, sWindowSeconds);
 }
 
 void profile_log_frame(void) {
@@ -137,12 +156,13 @@ void profile_log_frame(void) {
     fprintf(sFile,
             "%llu,%.3f,%d,%d,%d,%d,%u,%u,"
             "%d,%d,%d,%d,%d,%d,%d,"
-            "%d,%d,%d,%d,%d,%d,%d,"
+            "%d,%d,%d,%d,%d,%d,%d,%d,"
             "%d,%d,%d,%d,"
             "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
             "%u,%u,%u,%u,%u,%u,%u,%u,"
-            "%u,%u,%u,%u,%u,%u,"
-            "%u,%u,%u,%u,%d,%d,"
+            "%u,%u,%u,%u,"
+            "%u,%u,%u,%u,%u,%u,%u,"
+            "%u,%u,%u,%u,%u,%u,%d,%d,"
             "%d,%d,%d\n",
             (unsigned long long)sFrame,
             clock_elapsed_f64() - sStartTime,
@@ -152,6 +172,7 @@ void profile_log_frame(void) {
             profile_ctx_us(CTX_NETWORK),
             profile_ctx_us(CTX_NET_CODEC),
             profile_ctx_us(CTX_NET_SOCKET),
+            profile_ctx_us(CTX_NET_RECV),
             profile_ctx_us(CTX_INTERP),
             profile_ctx_us(CTX_GAME_LOOP),
             profile_ctx_us(CTX_LEVEL_SCRIPT),
@@ -171,9 +192,11 @@ void profile_log_frame(void) {
             c->texCacheFlushes, c->texBinds, c->texBindSkips, c->texImportSkips, c->shaderLoads,
             c->flushDepth, c->flushViewport, c->flushShader, c->flushAlpha,
             c->flushTexture, c->flushSampler, c->flushBufferFull, c->flushCombiner,
-            c->hookCalls, c->hookBehavior, c->luaFieldGets, c->luaFieldSets,
+            c->drawsOpaque, c->drawsBlend, c->flushTexOpaque, c->flushTexBlend,
+            c->hookCalls, c->hookBehavior, c->luaFieldGets, c->luaFieldSets, c->luaFieldMemoHits,
             c->codecCompressCalls, c->codecDecompressCalls,
-            c->objsDrawn, c->dlNodes, c->dlDistinct, c->renderSkips,
+            c->objsDrawn, c->objsCulled, c->objsCulledSize,
+            c->dlNodes, c->dlDistinct, c->renderSkips,
             (int)(gSimLagSeconds * 1000000.0),
             (int)(gSimOnlySeconds * 1000000.0),
             (int)m->pos[0], (int)m->pos[1], (int)m->pos[2]);
@@ -181,6 +204,13 @@ void profile_log_frame(void) {
     sFrame++;
     memset(c, 0, sizeof(*c));
     memset(sDlSeen, 0, sizeof(sDlSeen));
+
+    // Close the sampler's current time window if this frame crossed its end, so
+    // the sample dump can be sliced to a bad patch instead of only ever being
+    // read as a whole-session aggregate. Same clock as the time_s column above.
+    const f64 nowSeconds = clock_elapsed_f64() - sStartTime;
+    profile_sample_tick(nowSeconds);
+    profile_hook_types_tick(sHookPath, nowSeconds, sWindowSeconds);
 
     // the SD card in these handhelds is slow, so write in chunks rather than
     // per frame, and never inside a frame we are trying to measure
@@ -195,8 +225,8 @@ void profile_log_shutdown(void) {
     fflush(sFile);
     fclose(sFile);
     sFile = NULL;
-    profile_sample_dump(sSamplePath);
-    profile_dump_hook_types(sHookPath);
+    profile_sample_dump(clock_elapsed_f64() - sStartTime);
+    profile_dump_hook_types(sHookPath, clock_elapsed_f64() - sStartTime);
     printf("[profile] wrote %llu frames\n", (unsigned long long)sFrame);
 }
 

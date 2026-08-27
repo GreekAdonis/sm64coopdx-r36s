@@ -34,17 +34,28 @@ struct ProfileCounters {
     u32 shaderLoads;     // shader program switches
     u32 subFrames;       // rendered frames produced for this game frame
 
-    // Lua traffic. us_hook divided by hookCalls is the average cost of one
-    // call into a mod, which is what says whether the engine's per-call
-    // overhead is worth attacking: many cheap calls are the engine's problem,
-    // a few expensive ones are the mod's and no client-side change touches
-    // them. Field gets/sets count the cobject __index/__newindex path, the
-    // hottest thing in the binding and the one that scales with how hard mods
-    // poke at object fields rather than with how much work they do.
+    // Lua traffic. us_hook divided by hookCalls is the average cost of one call
+    // into a mod, which says how much of it is the binding's own dispatch: many
+    // cheap calls mean dispatch dominates and fixing it helps every mod at once.
+    //
+    // It does not say a large figure is unfixable. us_hook is wall time inside
+    // smlua_pcall(), so it also contains every engine function the callback
+    // called back into -- run 15 had add_surface() at 32% of CPU that way, and
+    // it was fixed engine-side. The sampled profile is what separates mod
+    // bytecode from engine code that mods merely invoke.
+    //
+    // Field gets/sets count the cobject __index/__newindex path, the hottest
+    // thing in the binding and the one that scales with how hard mods poke at
+    // object fields rather than with how much work they do.
     u32 hookCalls;       // every smlua_call_hook() -- exactly what CTX_HOOK times
     u32 hookBehavior;    // of those, per-object behaviour callbacks
     u32 luaFieldGets;    // cobject __index
     u32 luaFieldSets;    // cobject __newindex
+    // Field lookups served by the direct-mapped memo in smlua_get_object_field()
+    // rather than by hashing into the per-LOT index. Against luaFieldGets +
+    // luaFieldSets this is the hit rate; a low one means the memo is thrashing
+    // and is costing a probe for nothing.
+    u32 luaFieldMemoHits;
 
     // Packet codec traffic. us_netcodec on its own cannot distinguish "we
     // compress a lot of packets" from "each compression is expensive", and the
@@ -67,6 +78,31 @@ struct ProfileCounters {
     u32 flushBufferFull; // hit MAX_BUFFERED triangles
     u32 flushCombiner;   // a new colour combiner had to be built
 
+    // The same draws and texture splits, divided by whether the pass they belong
+    // to can be reordered at all.
+    //
+    // Run 16 put draw submission at 50.9us per call (R^2 0.991 against draws and
+    // verts), so with nine Bowsers on screen 671 draws cost 34.2ms of a 53.9ms
+    // display-list pass -- double the vertex work -- and 87.7% of the splits
+    // behind them were fltexture. Batching by texture would collapse a lot of
+    // that, but only where draw order is free to change.
+    //
+    // geo_process_master_list_sub() emits one gDPSetRenderMode per master list,
+    // and the opaque layers (LAYER_FORCE..LAYER_OPAQUE_INTER) use render modes
+    // carrying Z_UPD while the transparent ones (LAYER_ALPHA..
+    // LAYER_TRANSPARENT_INTER) do not. Depth-writing draws resolve by z-buffer
+    // and may be emitted in any order; blended draws must stay back-to-front. So
+    // Z_UPD at flush time is the layer class, without the renderer needing to be
+    // told the layer index or the display list gaining a marker command.
+    //
+    // What this is for: `fltexopaque` is the recoverable part. If the texture
+    // churn turns out to sit in `fltexblend`, reordering cannot touch it and the
+    // idea is dead without anyone having to try it.
+    u32 drawsOpaque;     // draw calls in a depth-writing (reorderable) pass
+    u32 drawsBlend;      // draw calls in a blended (order-dependent) pass
+    u32 flushTexOpaque;  // of flushTexture, the reorderable ones
+    u32 flushTexBlend;   // of flushTexture, the ones that must keep their order
+
     // What the geo pass actually handed the renderer, which is what the
     // renderer's cost is proportional to -- the objects column counts what is
     // alive, not what is drawn, and nothing else here bridges the two.
@@ -80,6 +116,12 @@ struct ProfileCounters {
     // batching pass has something to collapse; if they track each other, the
     // geometry is per-instance and no such pass would help.
     u32 objsDrawn;       // objects that passed obj_is_in_view() and were rendered
+    // Objects the cull removed, and how many of those a screen-space size test
+    // caught on its own. objsDrawn + objsCulled is everything the geo pass tested,
+    // so the pair turns "the cull passes too much" from an inference into a
+    // measurement. objsCulledSize stays zero unless a size test is compiled in.
+    u32 objsCulled;
+    u32 objsCulledSize;
     u32 dlNodes;         // display lists appended to the master lists
     u32 dlDistinct;      // distinct display list pointers among them
 
@@ -96,7 +138,12 @@ extern struct ProfileCounters gProfileCounters;
 // CSV and the sampler dump. Defined in smlua_hooks.c, which owns both the
 // accumulators and the hook type names; declared here so profile_log.c does not
 // have to pull in the Lua headers.
-void profile_dump_hook_types(const char* path);
+void profile_dump_hook_types(const char* path, double nowSeconds);
+
+// Closes the current hook-attribution window if `nowSeconds` has crossed its
+// end. Opens the file on first call. Same windowing as the sampled profile, so
+// the two can be sliced to the same stretch of play.
+void profile_hook_types_tick(const char* path, double nowSeconds, double windowSeconds);
 
 #define PROFILE_ADD(_field, _n) (gProfileCounters._field += (u32)(_n))
 

@@ -144,17 +144,35 @@ struct Object *obj_get_first(enum ObjectList objList) {
     return NULL;
 }
 
+// The loop this replaces could not advance, so it only ever had three outcomes.
+//
+// It re-read `o->header.next` at the bottom instead of `next->header.next`, so
+// `next` never moved. When the object after `o` was deactivated it therefore spun
+// on the same pointer until the 10,000-iteration sanity guard broke it and the
+// function returned NULL -- ten thousand loads of the same activeFlags to reach a
+// conclusion available on the first one. Run 20 measured the caller,
+// obj_get_first_with_behavior_id(), at 2.22% of all main-thread CPU, climbing run
+// on run as flood's object churn produced more deactivated neighbours.
+//
+// Enumerating the cases collapses it:
+//
+//   o->header.next is the list head  -> loop never runs           -> NULL
+//   o->header.next is active         -> first iteration returns it -> that object
+//   o->header.next is deactivated    -> spins, guard fires         -> NULL
+//
+// so a single test gives the same answer every time. sanityDepth was local and
+// nothing else observed it, which is what makes this an exact substitution.
+//
+// Note what is deliberately NOT fixed: advancing `next` properly would let this
+// find objects further down the list that it currently walks past, and mods can
+// see that difference. Clients on other builds would still be reporting the old
+// answers, so the semantics stay exactly as they are and only the cost goes.
 static struct Object *obj_get_next_internal(struct Object *o, enum ObjectList objList) {
     if (gObjectLists && o) {
-        u32 sanityDepth = 0;
         struct Object *head = (struct Object *) &gObjectLists[objList];
         struct Object *next = (struct Object *) o->header.next;
-        while (next != head) {
-            if (++sanityDepth > 10000) { break; }
-            if (next->activeFlags != ACTIVE_FLAG_DEACTIVATED) {
-                return next;
-            }
-            next = (struct Object *) o->header.next;
+        if (next != head && next->activeFlags != ACTIVE_FLAG_DEACTIVATED) {
+            return next;
         }
     }
     return NULL;

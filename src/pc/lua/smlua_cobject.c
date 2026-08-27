@@ -161,14 +161,71 @@ bool smlua_valid_lot(u16 lot) {
     return false;
 }
 
+// A direct-mapped memo in front of the index above.
+//
+// The index already turned the lookup into one hash and one strcmp, but on
+// LOT_OBJECT's 764 fields that hash indexes a 2048-slot table: the hit path
+// loads index->slots[i], index->hashes[i] and then ot->fields[slot].key, three
+// scattered accesses across ~12KB before the strcmp even starts. On a 32K L1-D
+// with no L3 those are what the lookup actually costs, not the arithmetic.
+//
+// What makes a memo work here is that mods read the same handful of names over
+// and over -- a loop over 200 objects reading oPosX/oPosY/oPosZ is three names,
+// six hundred times. Keying on the string pointer collapses that to one load
+// from a table whose live set is a few lines, because Lua interns short strings
+// and hands back the same pointer for the same name every time.
+//
+// Run 17's flood window put smlua_get_object_field_from_ot at 1.58% of all
+// main-thread CPU with smlua__get_field another 0.95% on top, which is what
+// this is aimed at.
+//
+// The strcmp stays, and it is not redundant. Pointer equality alone would be an
+// ABA bug: a collected TString can be replaced by a different string at the same
+// address, and returning the wrong field for it would be a silent wrong read.
+// Verifying against the field's own key costs a comparison of two strings that
+// are both hot by construction, and it is what makes the memo exactly equivalent
+// to the lookup it skips.
+//
+// Only successful lookups are stored. A miss falls through every time, which is
+// what keeps mod-defined custom fields (resolved separately by
+// smlua_get_custom_field) from ever being shadowed by a stale entry.
+#define LUA_FIELD_MEMO_BITS 8
+#define LUA_FIELD_MEMO_SIZE (1 << LUA_FIELD_MEMO_BITS)
+#define LUA_FIELD_MEMO_MASK (LUA_FIELD_MEMO_SIZE - 1)
+
+struct LuaFieldMemo {
+    const char* key;                // interned Lua string, compared by pointer
+    struct LuaObjectField* field;
+    u16 lot;
+};
+
+static struct LuaFieldMemo sFieldMemo[LUA_FIELD_MEMO_SIZE];
+
 struct LuaObjectField *smlua_get_object_field(u16 lot, const char* key) {
     if (!smlua_valid_lot(lot)) { return NULL; }
-    if (lot > LOT_AUTOGEN_MIN) {
-        return smlua_get_object_field_autogen(lot, key);
+
+    // >> 3 because interned strings are allocated at least 8-byte aligned, so
+    // the low bits carry no information to index with.
+    struct LuaFieldMemo* memo = &sFieldMemo[((uintptr_t) key >> 3) & LUA_FIELD_MEMO_MASK];
+    if (memo->key == key && memo->lot == lot && memo->field != NULL
+        && strcmp(key, memo->field->key) == 0) {
+        PROFILE_ADD(luaFieldMemoHits, 1);
+        return memo->field;
     }
 
-    struct LuaObjectTable* ot = &sLuaObjectTable[lot];
-    return smlua_get_object_field_from_ot(ot, key);
+    struct LuaObjectField* field;
+    if (lot > LOT_AUTOGEN_MIN) {
+        field = smlua_get_object_field_autogen(lot, key);
+    } else {
+        field = smlua_get_object_field_from_ot(&sLuaObjectTable[lot], key);
+    }
+
+    if (field != NULL) {
+        memo->key = key;
+        memo->lot = lot;
+        memo->field = field;
+    }
+    return field;
 }
 
 bool smlua_valid_lvt(u16 lvt) {

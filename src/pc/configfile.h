@@ -68,6 +68,7 @@ extern unsigned int configRenderSkipEnterMs;
 extern unsigned int configRenderSkipExitMs;
 extern unsigned int configRenderSkipMax;
 extern unsigned int configRenderSkipHud;
+extern unsigned int configRenderSkipStallMs;
 extern unsigned int configRenderSkipFutilePct;
 extern unsigned int configLuaSkipUnconnectedPlayers;
 extern unsigned int configLuaGcPause;
