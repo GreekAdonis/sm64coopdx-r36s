@@ -118,6 +118,11 @@ unsigned int configRenderSkipHud                  = 1;  // also skip HUD Lua hoo
 // ticks) to test it; 0 keeps the pre-existing behaviour.
 unsigned int configRenderSkipStallMs              = 0;
 unsigned int configRenderSkipFutilePct            = 100; // stop dropping once a sim-only tick costs this % of budget; 0 disables
+// Object culling in the geo pass -- see obj_is_in_view() in rendering_graph_node.c.
+// Both attack the same waste: geometry transformed and lit before gfx_sp_tri1()
+// throws it away for being off screen or too small to see.
+unsigned int configCullScaleRadius                = 1;  // scale an object's culling radius by its own scale
+unsigned int configCullMinPixels                  = 2;  // cull objects whose on-screen radius is under N pixels; 0 disables
 unsigned int configLuaSkipUnconnectedPlayers      = 1;  // don't run per-Mario hooks for empty player slots
 unsigned int configLuaGcPause                     = 0;  // Lua GC pause %, 0 = leave at the interpreter default
 unsigned int configLuaGcStepMul                   = 0;  // Lua GC step multiplier %, 0 = leave at the default
@@ -319,6 +324,8 @@ static const struct ConfigOption options[] = {
     {.name = "render_skip_hud",                .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipHud},
     {.name = "render_skip_futile_pct",         .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipFutilePct},
     {.name = "render_skip_stall_ms",           .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipStallMs},
+    {.name = "cull_scale_radius",              .type = CONFIG_TYPE_UINT, .uintValue = &configCullScaleRadius},
+    {.name = "cull_min_pixels",                .type = CONFIG_TYPE_UINT, .uintValue = &configCullMinPixels},
     {.name = "lua_skip_unconnected_players",   .type = CONFIG_TYPE_UINT, .uintValue = &configLuaSkipUnconnectedPlayers},
     {.name = "lua_gc_pause",                   .type = CONFIG_TYPE_UINT, .uintValue = &configLuaGcPause},
     {.name = "lua_gc_stepmul",                 .type = CONFIG_TYPE_UINT, .uintValue = &configLuaGcStepMul},
@@ -894,6 +901,10 @@ NEXT_OPTION:
     if (configRenderSkipFutilePct != 0 && configRenderSkipFutilePct < 100) {
         configRenderSkipFutilePct = 100;
     }
+    // A threshold this large would start removing things the player can plainly
+    // see; the point of the test is sub-visible geometry, not level-of-detail.
+    if (configCullMinPixels > 16) { configCullMinPixels = 16; }
+
     // Below two ticks this would fire on ordinary heavy frames and the policy
     // would never accumulate the debt it exists to act on. 0 disables it.
     if (configRenderSkipStallMs != 0 && configRenderSkipStallMs < 67) {

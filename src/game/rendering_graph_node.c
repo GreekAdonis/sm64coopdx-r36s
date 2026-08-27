@@ -1532,10 +1532,36 @@ static s32 obj_is_in_view(struct GraphNodeObject *node, Mat4 matrix) {
     // but the issue will be more apparent on widescreen.
     f32 hScreenEdge = vScreenEdge * GFX_DIMENSIONS_ASPECT_RATIO;
 
-    s16 cullingRadius = 300;
+    f32 cullingRadius = 300.0f;
     struct GraphNode *geo = node->sharedChild;
     if (geo != NULL && geo->type == GRAPH_NODE_TYPE_CULLING_RADIUS) {
-        cullingRadius = (f32)((struct GraphNodeCullingRadius *) geo)->cullingRadius; //! Why is there a f32 cast?
+        cullingRadius = (f32)((struct GraphNodeCullingRadius *) geo)->cullingRadius;
+    }
+
+    // The culling radius is declared in model space, but every distance it is
+    // compared against below is in camera space -- and geo_process_object() has
+    // already folded the object's own scale into `matrix` via mtxf_scale_vec3f(),
+    // which touches the 3x3 basis and leaves the translation column alone. So the
+    // position was in the right space and the radius was not.
+    //
+    // Ignoring the scale over-estimates a scaled-down object, which is exactly
+    // the shape of a particle system: run 13's blood particles carry the default
+    // radius of 300 while being a fraction of that in real size, so the frustum
+    // test below was padded by up to 300 units in every direction for objects a
+    // few units across, and 374 of 474 objects passed it. It also *under*
+    // estimates a scaled-up object, which is a real pop-out bug the same way.
+    //
+    // Caveat: an object with a throwMatrix that itself scales is not described by
+    // node->scale alone, so its radius can come out too small here. Such objects
+    // can opt out with skipInViewCheck, and cull_min_pixels/cull_scale_radius
+    // turn the two halves of this off without a rebuild.
+    if (configCullScaleRadius) {
+        f32 sx = fabsf(node->scale[0]);
+        f32 sy = fabsf(node->scale[1]);
+        f32 sz = fabsf(node->scale[2]);
+        f32 scaleMax = sx > sy ? sx : sy;
+        if (sz > scaleMax) { scaleMax = sz; }
+        cullingRadius *= scaleMax;
     }
 
     // Don't render if the object is close to or behind the camera
@@ -1549,6 +1575,28 @@ static s32 obj_is_in_view(struct GraphNodeObject *node, Mat4 matrix) {
     //  when converting the transformation matrix to a fixed point matrix.
     if (configDrawDistance != 6 && matrix[3][2] < -20000.0f - cullingRadius) {
         return FALSE;
+    }
+
+    // Cull anything too small on screen to be worth transforming.
+    //
+    // The frustum tests below only ask *where* an object is, never how big it
+    // ends up. A particle far enough away to cover a pixel still has every one of
+    // its vertices transformed and lit, and then gfx_sp_tri1() throws the
+    // triangles away -- run 13's peak assembled 27,662 triangles to draw 7,348,
+    // with 13,416 (49%) rejected on the clip test after the work was done.
+    //
+    // vScreenEdge is the view volume's half-height in world units at this depth,
+    // so cullingRadius/vScreenEdge is the object's radius as a fraction of half
+    // the screen, and scaling by half the render height puts it in pixels. That
+    // makes the threshold resolution-independent: the same setting culls at a
+    // greater distance on a larger framebuffer, which is what you want.
+    if (configCullMinPixels > 0 && vScreenEdge > 0.0f) {
+        f32 pixelRadius = cullingRadius * (f32)gfx_current_dimensions.height
+                          / (2.0f * vScreenEdge);
+        if (pixelRadius < (f32)configCullMinPixels) {
+            PROFILE_ADD(objsCulledSize, 1);
+            return FALSE;
+        }
     }
 
     // Check whether the object is horizontally in view

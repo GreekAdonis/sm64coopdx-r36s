@@ -116,10 +116,11 @@ struct ProfileCounters {
     // batching pass has something to collapse; if they track each other, the
     // geometry is per-instance and no such pass would help.
     u32 objsDrawn;       // objects that passed obj_is_in_view() and were rendered
-    // Objects the cull removed, and how many of those a screen-space size test
+    // Objects the cull removed, and how many of those the screen-space size test
     // caught on its own. objsDrawn + objsCulled is everything the geo pass tested,
     // so the pair turns "the cull passes too much" from an inference into a
-    // measurement. objsCulledSize stays zero unless a size test is compiled in.
+    // measurement -- and objsCulledSize says whether cull_min_pixels is earning
+    // its keep or just costing a divide per object.
     u32 objsCulled;
     u32 objsCulledSize;
     u32 dlNodes;         // display lists appended to the master lists
