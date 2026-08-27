@@ -207,9 +207,15 @@ static s32 djui_osk_next_col(s32 row, s32 col, s32 step) {
 static void djui_osk_move_cursor(s32 dRow, s32 dCol) {
     if (sPhraseMode) {
         if (dRow < 0) {
-            sPhraseMode = false;
+            if (sCursorPhrase == 0) {
+                sPhraseMode = false;
+            } else {
+                sCursorPhrase--;
+            }
         } else if (dRow > 0) {
-            sCursorPhrase = (sCursorPhrase + 1) % OSK_PHRASE_COUNT;
+            if (sCursorPhrase < OSK_PHRASE_COUNT - 1) {
+                sCursorPhrase++;
+            }
         } else if (dCol != 0) {
             sPhraseMode = false;
         }
@@ -328,12 +334,6 @@ void djui_osk_update(void) {
     }
 
     if (pressed & PAD_BUTTON_B) {
-        if (sPhraseMode) {
-            sPhraseMode = false;
-            sLastPadButton = button;
-            djui_osk_consume_input();
-            return;
-        }
         djui_interactable_on_key_down(SCANCODE_BACKSPACE);
         sBSHeld = true;
         sBSRepeatTimer = OSK_BS_INITIAL_DELAY;
@@ -392,7 +392,7 @@ void djui_osk_render(void) {
         s32 keyStart = 0;
         for (col = 0; col < OSK_COLS; col++) {
             struct OskKey key;
-            bool isSelected = (row == sCursorRow && col == sCursorCol);
+            bool isSelected = !sPhraseMode && (row == sCursorRow && col == sCursorCol);
             if (row < OSK_ROWS - 1) {
                 djui_osk_get_key(row, col, &key);
             } else {
@@ -459,7 +459,7 @@ void djui_osk_render(void) {
     if (djui_osk_focus_is_chat()) {
         f32 phraseW = keyW * OSK_PHRASE_COLS + gap * (OSK_PHRASE_COLS - 1);
         f32 px = x0 + (OSK_COLS - OSK_PHRASE_COLS) * (keyW + gap);
-        f32 py0 = y0 + pad + (OSK_ROWS - 1) * (keyH + gap) + keyH + gap;
+        f32 py0 = y0 + pad + (OSK_ROWS - 1) * (keyH + gap) + keyH + 2.0f * gap;
 
         for (s32 i = 0; i < OSK_PHRASE_COUNT; i++) {
             f32 py = py0 + i * (keyH + gap);

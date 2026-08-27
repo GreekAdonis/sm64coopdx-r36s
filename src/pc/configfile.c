@@ -73,7 +73,7 @@ ConfigWindow configWindow = {
     .h = DESIRED_SCREEN_HEIGHT,
     .vsync = 1,
     .reset = false,
-    .fullscreen = false,
+    .fullscreen = true,
     .exiting_fullscreen = false,
     .settings_changed = false,
     .msaa = 0,
@@ -227,7 +227,7 @@ bool         configDisableGamepads                = false;
 bool         configUseStandardKeyBindingsChat     = false;
 bool         configSmoothScrolling                = false;
 // free camera settings
-bool         configEnableFreeCamera               = false;
+bool         configEnableFreeCamera               = true;
 bool         configFreeCameraAnalog               = false;
 bool         configFreeCameraLCentering           = false;
 bool         configFreeCameraDPadBehavior         = false;
@@ -247,7 +247,7 @@ bool         configRomhackCameraDPadBehavior      = false;
 bool         configRomhackCameraFollowing          = true;
 
 // common camera settings
-bool         configCameraInvertX                  = false;
+bool         configCameraInvertX                  = true;
 bool         configCameraInvertY                  = true;
 bool         configCameraToxicGas                 = true;
 // debug
@@ -304,7 +304,7 @@ bool         configDjuiThemeCenter                = true;
 #endif
 bool         configDjuiThemeGradients             = true;
 unsigned int configDjuiThemeFont                  = FONT_NORMAL;
-unsigned int configDjuiScale                      = 0;
+unsigned int configDjuiScale                      = 2;
 // other
 unsigned int configRulesVersion                   = 0;
 bool         configHideSocketWarning              = false;
