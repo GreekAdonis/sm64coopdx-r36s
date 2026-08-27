@@ -117,7 +117,8 @@ void profile_log_init(void) {
             "drawsopaque,drawsblend,fltexopaque,fltexblend,"
             "hookcalls,hookbhv,fieldgets,fieldsets,fieldmemo,codeccomp,codecdecomp,"
             "objsdrawn,objsculled,objsculledsize,dlnodes,dldistinct,renderskips,simlag_us,simonly_us,"
-            "mario_x,mario_y,mario_z\n");
+            "mario_x,mario_y,mario_z,"
+            "shadercompiles,shadercachehits,shaderevictions,staticgeoculled\n");
 
     sStartTime = clock_elapsed_f64();
     printf("[profile] logging frames to '%s'\n", path);
@@ -163,7 +164,8 @@ void profile_log_frame(void) {
             "%u,%u,%u,%u,"
             "%u,%u,%u,%u,%u,%u,%u,"
             "%u,%u,%u,%u,%u,%u,%d,%d,"
-            "%d,%d,%d\n",
+            "%d,%d,%d,"
+            "%u,%u,%u,%u\n",
             (unsigned long long)sFrame,
             clock_elapsed_f64() - sStartTime,
             (int)gCurrLevelNum, (int)gCurrAreaIndex, (int)gCurrActNum,
@@ -199,7 +201,9 @@ void profile_log_frame(void) {
             c->dlNodes, c->dlDistinct, c->renderSkips,
             (int)(gSimLagSeconds * 1000000.0),
             (int)(gSimOnlySeconds * 1000000.0),
-            (int)m->pos[0], (int)m->pos[1], (int)m->pos[2]);
+            (int)m->pos[0], (int)m->pos[1], (int)m->pos[2],
+            c->shaderCompiles, c->shaderCacheHits, c->shaderEvictions,
+            c->staticGeoCulled);
 
     sFrame++;
     memset(c, 0, sizeof(*c));

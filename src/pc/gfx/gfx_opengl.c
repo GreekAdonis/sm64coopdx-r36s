@@ -31,6 +31,7 @@
 #include "gfx_cc.h"
 #include "gfx_rendering_api.h"
 #include "gfx_pc.h"
+#include "gfx_shader_cache.h"
 #include "pc/debug_context.h"
 #include "pc/profile_log.h"
 
@@ -83,8 +84,9 @@ struct GLTexture {
 };
 
 static struct ShaderProgram shader_program_pool[CC_MAX_SHADERS];
+// High-water mark, not an occupancy count: released slots stay inside this range
+// with opengl_program_id == 0 and get reused before the pool grows.
 static uint8_t shader_program_pool_size = 0;
-static uint8_t shader_program_pool_index = 0;
 static GLuint opengl_vbo;
 static GLuint opengl_vao;
 
@@ -903,44 +905,87 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorC
     const GLint lengths[2] = { vs_len, fs_len };
     GLint success;
 
-    GLuint vertex_shader = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vertex_shader, 1, &sources[0], &lengths[0]);
-    glCompileShader(vertex_shader);
-    glGetShaderiv(vertex_shader, GL_COMPILE_STATUS, &success);
-    if (!success) {
-        GLint max_length = 0;
-        glGetShaderiv(vertex_shader, GL_INFO_LOG_LENGTH, &max_length);
-        char error_log[1024];
-        fprintf(stderr, "Vertex shader compilation failed\n");
-        glGetShaderInfoLog(vertex_shader, max_length, &max_length, &error_log[0]);
-        fprintf(stderr, "%s\n", &error_log[0]);
-        sys_fatal("vertex shader compilation failed (see terminal)");
-    }
-
-    GLuint fragment_shader = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fragment_shader, 1, &sources[1], &lengths[1]);
-    glCompileShader(fragment_shader);
-    glGetShaderiv(fragment_shader, GL_COMPILE_STATUS, &success);
-    if (!success) {
-        GLint max_length = 0;
-        glGetShaderiv(fragment_shader, GL_INFO_LOG_LENGTH, &max_length);
-        char error_log[1024];
-        fprintf(stderr, "Fragment shader compilation failed\n");
-        glGetShaderInfoLog(fragment_shader, max_length, &max_length, &error_log[0]);
-        fprintf(stderr, "%s\n", &error_log[0]);
-        sys_fatal("fragment shader compilation failed (see terminal)");
-    }
-
     GLuint shader_program = glCreateProgram();
-    glAttachShader(shader_program, vertex_shader);
-    glAttachShader(shader_program, fragment_shader);
-    glLinkProgram(shader_program);
+
+    // The sources fully determine the linked program, so their hash is the
+    // cache key -- and because it is derived from the text rather than from the
+    // combiner, any edit to the generator above invalidates every stale entry
+    // on its own, with no version constant for anyone to forget to bump.
+    const uint64_t source_hash = gfx_shader_cache_hash_source(vs_buf, fs_buf);
+
+    if (gfx_shader_cache_load(source_hash, shader_program)) {
+        // A ~180ms compile on this hardware, replaced by a memcpy. Everything
+        // below queries the linked program, which works exactly the same way
+        // whether it was linked from source or handed over as a binary.
+        PROFILE_ADD(shaderCacheHits, 1);
+    } else {
+        GLuint vertex_shader = glCreateShader(GL_VERTEX_SHADER);
+        glShaderSource(vertex_shader, 1, &sources[0], &lengths[0]);
+        glCompileShader(vertex_shader);
+        glGetShaderiv(vertex_shader, GL_COMPILE_STATUS, &success);
+        if (!success) {
+            GLint max_length = 0;
+            glGetShaderiv(vertex_shader, GL_INFO_LOG_LENGTH, &max_length);
+            char error_log[1024];
+            fprintf(stderr, "Vertex shader compilation failed\n");
+            glGetShaderInfoLog(vertex_shader, max_length, &max_length, &error_log[0]);
+            fprintf(stderr, "%s\n", &error_log[0]);
+            sys_fatal("vertex shader compilation failed (see terminal)");
+        }
+
+        GLuint fragment_shader = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(fragment_shader, 1, &sources[1], &lengths[1]);
+        glCompileShader(fragment_shader);
+        glGetShaderiv(fragment_shader, GL_COMPILE_STATUS, &success);
+        if (!success) {
+            GLint max_length = 0;
+            glGetShaderiv(fragment_shader, GL_INFO_LOG_LENGTH, &max_length);
+            char error_log[1024];
+            fprintf(stderr, "Fragment shader compilation failed\n");
+            glGetShaderInfoLog(fragment_shader, max_length, &max_length, &error_log[0]);
+            fprintf(stderr, "%s\n", &error_log[0]);
+            sys_fatal("fragment shader compilation failed (see terminal)");
+        }
+
+        glAttachShader(shader_program, vertex_shader);
+        glAttachShader(shader_program, fragment_shader);
+        glLinkProgram(shader_program);
+
+        // The program holds its own reference until it is deleted, so these can
+        // go now. They were never deleted before, which leaked two GL objects
+        // per program for the life of the process.
+        glDetachShader(shader_program, vertex_shader);
+        glDetachShader(shader_program, fragment_shader);
+        glDeleteShader(vertex_shader);
+        glDeleteShader(fragment_shader);
+
+        PROFILE_ADD(shaderCompiles, 1);
+        gfx_shader_cache_store(source_hash, shader_program);
+    }
 
     size_t cnt = 0;
 
-    struct ShaderProgram *prg = &shader_program_pool[shader_program_pool_index];
-    shader_program_pool_index = (shader_program_pool_index + 1) % CC_MAX_SHADERS;
-    if (shader_program_pool_size < CC_MAX_SHADERS) { shader_program_pool_size++; }
+    // Slots are handed back by gfx_opengl_release_shader() when their combiner
+    // is evicted, so reuse the first free one before growing. The pool used to
+    // be a ring that overwrote whatever was at the next index, which both leaked
+    // the outgoing program and left every ColorCombiner still pointing at that
+    // slot silently running the wrong shader.
+    struct ShaderProgram *prg = NULL;
+    for (size_t i = 0; i < shader_program_pool_size; i++) {
+        if (shader_program_pool[i].opengl_program_id == 0) {
+            prg = &shader_program_pool[i];
+            break;
+        }
+    }
+    if (prg == NULL) {
+        if (shader_program_pool_size >= CC_MAX_SHADERS) {
+            // Unreachable: the combiner pool is the same size and releases a
+            // slot here before ever asking for a new one. Rather than scribble
+            // over a live slot, fail loudly.
+            sys_fatal("shader program pool exhausted");
+        }
+        prg = &shader_program_pool[shader_program_pool_size++];
+    }
 
     prg->attrib_locations[cnt] = glGetAttribLocation(shader_program, "aVtxPos");
     prg->attrib_sizes[cnt] = 4;
@@ -1039,6 +1084,10 @@ static struct ShaderProgram *gfx_opengl_create_and_load_new_shader(struct ColorC
 
 static struct ShaderProgram *gfx_opengl_lookup_shader(struct ColorCombiner* cc) {
     for (size_t i = 0; i < shader_program_pool_size; i++) {
+        // A released slot keeps its place in the array with a zeroed handle, so
+        // it has to be skipped explicitly rather than trusted to have a hash
+        // that matches nothing.
+        if (shader_program_pool[i].opengl_program_id == 0) { continue; }
         if (shader_program_pool[i].hash == cc->hash) {
             return &shader_program_pool[i];
         }
@@ -1252,6 +1301,11 @@ static void gfx_opengl_init(void) {
         sys_fatal("OpenGL 2.1+ is required.\nReported version: %s%d.%d", is_es ? "ES" : "", vmajor, vminor);
     }
 
+    // Needs a live context, so it cannot happen any earlier than this. Reads the
+    // on-disk program binaries so the first shader this session asks for can be
+    // handed over instead of compiled.
+    gfx_shader_cache_init();
+
     // A fresh context has every attribute array disabled and no pointer state,
     // so the mirror has to start from that and not from whatever a previous
     // context left behind.
@@ -1413,7 +1467,39 @@ static const char* gfx_opengl_get_name(void) {
     return "OpenGL";
 }
 
+// Hands a program slot back. The combiner that owned it has been evicted, so
+// nothing can reach this ShaderProgram any more and the GL object behind it is
+// dead weight -- before this existed, wrapping the pool overwrote the slot and
+// leaked both the program and its two shader objects.
+static void gfx_opengl_release_shader(struct ShaderProgram *prg) {
+    if (prg == NULL || prg->opengl_program_id == 0) { return; }
+
+    // Never leave the GL binding pointing at a program we are about to delete,
+    // and never leave our own cache claiming it is still current.
+    if (opengl_prg == prg) {
+        glUseProgram(0);
+        opengl_prg = NULL;
+    }
+
+    glDeleteProgram(prg->opengl_program_id);
+    prg->opengl_program_id = 0;
+    prg->hash = 0;
+    PROFILE_ADD(shaderEvictions, 1);
+}
+
 static void gfx_opengl_shutdown(void) {
+    for (size_t i = 0; i < shader_program_pool_size; i++) {
+        if (shader_program_pool[i].opengl_program_id != 0) {
+            glDeleteProgram(shader_program_pool[i].opengl_program_id);
+            shader_program_pool[i].opengl_program_id = 0;
+        }
+    }
+    shader_program_pool_size = 0;
+    opengl_prg = NULL;
+
+    gfx_shader_cache_flush();
+    gfx_shader_cache_shutdown();
+
 #ifdef HANDHELD
     gfx_opengl_handheld_destroy_fbo();
     if (sHandheldBlitProgram) { glDeleteProgram(sHandheldBlitProgram); sHandheldBlitProgram = 0; }
@@ -1444,5 +1530,6 @@ struct GfxRenderingAPI gfx_opengl_api = {
     gfx_opengl_end_frame,
     gfx_opengl_finish_render,
     gfx_opengl_get_name,
-    gfx_opengl_shutdown
+    gfx_opengl_shutdown,
+    gfx_opengl_release_shader
 };

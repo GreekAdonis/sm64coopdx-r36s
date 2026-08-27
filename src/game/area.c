@@ -17,6 +17,7 @@
 #include "audio/external.h"
 #include "area.h"
 #include "rendering_graph_node.h"
+#include "geo_dl_bounds.h"
 #include "level_update.h"
 #include "engine/geo_layout.h"
 #include "save_file.h"
@@ -262,6 +263,12 @@ void clear_areas(void) {
 }
 
 void clear_area_graph_nodes(void) {
+    // The bounding boxes cached for this area's display lists are keyed by
+    // pointer, and the memory behind those pointers is about to be released.
+    // Anything allocated at the same address afterwards would otherwise inherit
+    // a box describing geometry that no longer exists, and get culled by it.
+    geo_dl_bounds_reset();
+
     if (gCurrentArea != NULL) {
         geo_call_global_function_nodes(&gCurrentArea->root->node, GEO_CONTEXT_AREA_UNLOAD);
         gCurrentArea = NULL;

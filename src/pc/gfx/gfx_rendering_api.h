@@ -33,6 +33,17 @@ struct GfxRenderingAPI {
     void (*finish_render)(void);
     const char* (*get_name)(void);
     void (*shutdown)(void);
+
+    // Gives a shader program back to the backend, which frees whatever it owns
+    // and marks its pool slot reusable. Called when the colour combiner that
+    // owns the program is evicted, so that a program's lifetime is exactly its
+    // combiner's -- see gfx_lookup_or_create_color_combiner() in gfx_pc.c.
+    //
+    // Optional. Backends that leave it NULL simply never reclaim, which is what
+    // every backend did before this existed. Deliberately last in the struct:
+    // the initialisers here are positional, and two of them already stop short
+    // of the end.
+    void (*release_shader)(struct ShaderProgram *prg);
 };
 
 #endif

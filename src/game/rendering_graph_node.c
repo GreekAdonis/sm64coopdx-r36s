@@ -5,6 +5,7 @@
 #include "engine/lighting_engine.h"
 #include "data/dynos_cmap.cpp.h"
 #include "game_init.h"
+#include "geo_dl_bounds.h"
 #include "gfx_dimensions.h"
 #include "main.h"
 #include "memory.h"
@@ -1099,14 +1100,86 @@ static void geo_process_billboard(struct GraphNodeBillboard *node) {
 }
 
 /**
+ * Whether a static display list's own geometry can reach the screen under the
+ * current matrix.
+ *
+ * obj_is_in_view() above does this for objects, using a radius declared by the
+ * model. A level's static geometry has no such declaration and was therefore
+ * never tested at all -- it went to the master lists in full every frame, and
+ * the parts of it behind the camera were transformed, lit, and then discarded by
+ * gfx_sp_tri1()'s clip test. See geo_dl_bounds.h for what that cost.
+ *
+ * The box the walk produces is treated as its bounding sphere, which is the same
+ * shape of test obj_is_in_view() already applies and errs the safe way: a sphere
+ * contains its box, so anything this rejects was outside the frustum by at least
+ * the slack between the two. A list that cannot be bounded is always drawn.
+ */
+static bool geo_dl_is_in_view(void *displayList) {
+    if (!configCullStaticGeo) { return TRUE; }
+
+    // Only inside the camera's subtree does the top of the matrix stack map model
+    // space to camera space, which is what every comparison below assumes.
+    // obj_is_in_view() gets that for free by only ever being called from
+    // geo_process_object(); this runs from a node type that can also appear in
+    // 2D and screen-space trees, where the same arithmetic would be nonsense.
+    if (!gCurGraphNodeCamFrustum || !gCurGraphNodeCamera) { return TRUE; }
+
+    Vec3f center;
+    f32 radius;
+    if (!geo_dl_bounds_get(displayList, center, &radius)) { return TRUE; }
+
+    // The bounds are in the space the top of the matrix stack maps from, so one
+    // transform puts the centre in camera space -- the same space, and the same
+    // sign conventions, obj_is_in_view() documents at length. Row 3 is the
+    // translation, which is why that function reads matrix[3][n] for a position.
+    f32 (*m)[4] = gMatStack[gMatStackIndex];
+    f32 cx = m[0][0] * center[0] + m[1][0] * center[1] + m[2][0] * center[2] + m[3][0];
+    f32 cy = m[0][1] * center[0] + m[1][1] * center[1] + m[2][1] * center[2] + m[3][1];
+    f32 cz = m[0][2] * center[0] + m[1][2] * center[1] + m[2][2] * center[2] + m[3][2];
+
+    // The matrix may scale, and the radius is in model space. Take the longest
+    // of the three basis vectors: for a uniform scale that is exact, and for a
+    // non-uniform one it over-estimates, which is the direction that keeps
+    // geometry on screen rather than popping it out.
+    f32 s = 0.0f;
+    for (int i = 0; i < 3; i++) {
+        f32 len = m[i][0] * m[i][0] + m[i][1] * m[i][1] + m[i][2] * m[i][2];
+        if (len > s) { s = len; }
+    }
+    radius *= sqrtf(s);
+
+    // Behind the camera, or past the far plane. -cz is the depth.
+    if (cz > -100.0f + radius) { return FALSE; }
+    if (configDrawDistance != 6 && cz < -20000.0f - radius) { return FALSE; }
+
+    s16 halfFov = (gCurGraphNodeCamFrustum->fov / 2.0f + 1.0f) * 32768.0f / 180.0f + 0.5f;
+    f32 divisor = coss(halfFov);
+    if (divisor == 0) { divisor = 1; }
+    f32 vScreenEdge = -cz * sins(halfFov) / divisor;
+    f32 hScreenEdge = vScreenEdge * GFX_DIMENSIONS_ASPECT_RATIO;
+
+    if (cx >  hScreenEdge + radius) { return FALSE; }
+    if (cx < -hScreenEdge - radius) { return FALSE; }
+    if (cy >  vScreenEdge + radius) { return FALSE; }
+    if (cy < -vScreenEdge - radius) { return FALSE; }
+    return TRUE;
+}
+
+/**
  * Process a display list node. It draws a display list without first pushing
  * a transformation on the stack, so all transformations are inherited from the
  * parent node. It processes its children if it has them.
  */
 static void geo_process_display_list(struct GraphNodeDisplayList *node) {
     if (node->displayList != NULL) {
-        geo_append_display_list(node->displayList, node->node.flags >> 8);
+        if (geo_dl_is_in_view(node->displayList)) {
+            geo_append_display_list(node->displayList, node->node.flags >> 8);
+        } else {
+            PROFILE_ADD(staticGeoCulled, 1);
+        }
     }
+    // Children are processed either way: this node's own geometry being off
+    // screen says nothing about a child's, which carries its own transform.
     if (node->node.children != NULL) {
         geo_process_node_and_siblings(node->node.children);
     }

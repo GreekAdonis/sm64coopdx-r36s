@@ -123,6 +123,17 @@ unsigned int configRenderSkipFutilePct            = 100; // stop dropping once a
 // throws it away for being off screen or too small to see.
 unsigned int configCullScaleRadius                = 1;  // scale an object's culling radius by its own scale
 unsigned int configCullMinPixels                  = 2;  // cull objects whose on-screen radius is under N pixels; 0 disables
+// Frustum-cull the level's own static geometry, not just objects -- see
+// geo_dl_is_in_view() in rendering_graph_node.c. Run 23 measured 1,372 triangles
+// per subframe fully transformed and then thrown away against 1,532 actually
+// drawn, and matched-workload comparisons put that at 16-53% of the display-list
+// pass. 0 disables.
+unsigned int configCullStaticGeo                  = 1;
+// Persist linked shader binaries to disk so the driver only compiles each one
+// once per device instead of once per launch -- see gfx_shader_cache.c. Run 23
+// spent 7.3 seconds of a half-hour session inside glCompileShader/glLinkProgram,
+// in stalls of up to 1.29s. 0 disables and always compiles from source.
+unsigned int configShaderCache                    = 1;
 unsigned int configLuaSkipUnconnectedPlayers      = 1;  // don't run per-Mario hooks for empty player slots
 unsigned int configLuaGcPause                     = 0;  // Lua GC pause %, 0 = leave at the interpreter default
 unsigned int configLuaGcStepMul                   = 0;  // Lua GC step multiplier %, 0 = leave at the default
@@ -323,6 +334,8 @@ static const struct ConfigOption options[] = {
     {.name = "render_skip_max",                .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipMax},
     {.name = "render_skip_hud",                .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipHud},
     {.name = "render_skip_futile_pct",         .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipFutilePct},
+    {.name = "cull_static_geo",                .type = CONFIG_TYPE_UINT, .uintValue = &configCullStaticGeo},
+    {.name = "shader_cache",                   .type = CONFIG_TYPE_UINT, .uintValue = &configShaderCache},
     {.name = "render_skip_stall_ms",           .type = CONFIG_TYPE_UINT, .uintValue = &configRenderSkipStallMs},
     {.name = "cull_scale_radius",              .type = CONFIG_TYPE_UINT, .uintValue = &configCullScaleRadius},
     {.name = "cull_min_pixels",                .type = CONFIG_TYPE_UINT, .uintValue = &configCullMinPixels},

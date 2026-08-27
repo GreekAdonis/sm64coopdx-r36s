@@ -66,6 +66,8 @@ extern unsigned int configInterpolationMode;
 extern unsigned int configDrawDistance;
 extern unsigned int configCullScaleRadius;
 extern unsigned int configCullMinPixels;
+extern unsigned int configCullStaticGeo;
+extern unsigned int configShaderCache;
 extern unsigned int configRenderSkipEnterMs;
 extern unsigned int configRenderSkipExitMs;
 extern unsigned int configRenderSkipMax;

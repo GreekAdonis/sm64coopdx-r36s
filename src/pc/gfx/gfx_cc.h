@@ -101,6 +101,12 @@ struct ColorCombiner {
         uint64_t shader_commands_as_u64[8];
     };
     uint64_t hash;
+
+    // Frame this combiner was last resolved on, for the pool's eviction choice.
+    // Deliberately after `hash` and outside both unions above:
+    // color_combiner_update_hash() folds in only cm.hash and the two 16-byte
+    // arrays, so nothing here can perturb the key.
+    uint64_t last_used_frame;
 };
 
 #ifdef __cplusplus

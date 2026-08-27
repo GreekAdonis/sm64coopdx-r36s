@@ -47,7 +47,10 @@ u8 gGfxPcResetTex1 = 0;
 static struct TextureCache gfx_texture_cache = { 0 };
 static struct ColorCombiner color_combiner_pool[CC_MAX_SHADERS] = { 0 };
 static uint8_t color_combiner_pool_size = 0;
-static uint8_t color_combiner_pool_index = 0;
+
+// Bumped once per display-list run, so "used this frame" is a comparison rather
+// than a per-frame sweep. Only ordering matters, never the absolute value.
+static uint64_t sCombinerFrame = 1;
 
 struct RSP {
     ALIGNED16 Mat4 MP_matrix;
@@ -420,30 +423,106 @@ static void gfx_generate_cc(struct ColorCombiner *cc) {
     gfx_cc_print(cc);
 }
 
+// Cache of the last combiner resolved, so a run of triangles sharing one does
+// not re-hash. File scope rather than function scope because eviction has to be
+// able to clear it -- see the comment on the victim search below.
+static struct ColorCombiner *sPrevCombiner = NULL;
+
+// Picks the slot a new combiner will occupy, evicting if the pool is full.
+//
+// The pool used to be a ring: index++ % CC_MAX_SHADERS, overwriting whatever was
+// there. That was wrong in two ways once it wrapped, which run 23 came within
+// seven entries of doing (57 of 64 slots used). The overwritten combiner's
+// ShaderProgram was leaked, since nothing told the backend the slot was dead.
+// And every cached pointer to that slot -- sPrevCombiner, sTriState.comb -- kept
+// pointing at it, so a combiner that was still in use would silently start
+// rendering with the shader that replaced it.
+//
+// Least-recently-used instead, which is also the policy that actually suits the
+// access pattern: a room uses a working set of combiners over and over, and the
+// ring was as likely to evict one of those as anything else. Entries touched on
+// the current frame are never candidates, which is what makes it safe to hand
+// the slot straight back to the caller -- anything live this frame is by
+// definition off limits.
+static struct ColorCombiner *gfx_combiner_alloc_slot(void) {
+    if (color_combiner_pool_size < CC_MAX_SHADERS) {
+        return &color_combiner_pool[color_combiner_pool_size++];
+    }
+
+    struct ColorCombiner *victim = NULL;
+    for (size_t i = 0; i < color_combiner_pool_size; i++) {
+        struct ColorCombiner *cand = &color_combiner_pool[i];
+        if (cand->last_used_frame == sCombinerFrame) { continue; }
+        if (victim == NULL || cand->last_used_frame < victim->last_used_frame) {
+            victim = cand;
+        }
+    }
+
+    // Every one of the 64 slots was used this frame. A frame that genuinely
+    // needs more distinct combiners than the pool holds cannot be served without
+    // thrashing whatever it evicts, so refuse rather than corrupt: the caller
+    // reuses the least-recently-used entry's program, which draws the wrong
+    // material for one frame but keeps every pointer valid. In practice this
+    // does not happen -- run 23's busiest frame switched shaders 44 times across
+    // far fewer distinct combiners.
+    if (victim == NULL) { return NULL; }
+
+    // Tell the backend the program is dead before the slot changes identity, so
+    // it can free the GL object and drop it from its own pool.
+    if (gfx_rapi->release_shader != NULL) {
+        gfx_rapi->release_shader(victim->prg);
+    }
+    victim->prg = NULL;
+
+    // Anything still pointing here is now stale. rendering_state is compared by
+    // pointer on every triangle, so a released program left in it would match a
+    // future slot that happens to land at the same address.
+    if (sPrevCombiner == victim) { sPrevCombiner = NULL; }
+    if (sTriState.comb == victim) { sTriState.valid = false; sTriState.comb = NULL; }
+    rendering_state.shader_program = NULL;
+
+    return victim;
+}
+
 static struct ColorCombiner *gfx_lookup_or_create_color_combiner(struct CombineMode* cm) {
     combine_mode_update_hash(cm);
 
-    static struct ColorCombiner *prev_combiner;
-    if (prev_combiner != NULL && prev_combiner->cm.hash == cm->hash) {
-        return prev_combiner;
+    if (sPrevCombiner != NULL && sPrevCombiner->cm.hash == cm->hash) {
+        sPrevCombiner->last_used_frame = sCombinerFrame;
+        return sPrevCombiner;
     }
 
     for (size_t i = 0; i < color_combiner_pool_size; i++) {
         if (color_combiner_pool[i].cm.hash == cm->hash) {
-            return prev_combiner = &color_combiner_pool[i];
+            sPrevCombiner = &color_combiner_pool[i];
+            sPrevCombiner->last_used_frame = sCombinerFrame;
+            return sPrevCombiner;
         }
     }
 
     FLUSH_FOR(flushCombiner);
 
-    struct ColorCombiner *comb = &color_combiner_pool[color_combiner_pool_index];
-    color_combiner_pool_index = (color_combiner_pool_index + 1) % CC_MAX_SHADERS;
-    if (color_combiner_pool_size < CC_MAX_SHADERS) { color_combiner_pool_size++; }
+    struct ColorCombiner *comb = gfx_combiner_alloc_slot();
+    if (comb == NULL) {
+        // See gfx_combiner_alloc_slot(): nothing is evictable this frame. Fall
+        // back to the oldest entry as-is rather than building anything.
+        comb = &color_combiner_pool[0];
+        for (size_t i = 1; i < color_combiner_pool_size; i++) {
+            if (color_combiner_pool[i].last_used_frame < comb->last_used_frame) {
+                comb = &color_combiner_pool[i];
+            }
+        }
+        sPrevCombiner = comb;
+        comb->last_used_frame = sCombinerFrame;
+        return comb;
+    }
 
     memcpy(&comb->cm, cm, sizeof(struct CombineMode));
-    gfx_generate_cc(comb);
+    gfx_generate_cc(comb);   // resolves comb->prg and prints, as before
+    comb->last_used_frame = sCombinerFrame;
 
-    return prev_combiner = comb;
+    sPrevCombiner = comb;
+    return comb;
 }
 
 void gfx_texture_cache_clear(void) {
@@ -2407,6 +2486,11 @@ void gfx_start_frame(void) {
 void gfx_run(Gfx *commands) {
     gfx_sp_reset();
 
+    // One epoch per display-list run. The combiner pool refuses to evict
+    // anything stamped with the current value, so this is what makes "in use
+    // right now" a property the eviction search can see.
+    sCombinerFrame++;
+
     // A texture pack toggle or a Lua texture override changes what an unchanged
     // texture pointer resolves to, which the tile-descriptor guards in
     // gfx_update_loaded_texture()/gfx_dp_set_tile()/gfx_dp_set_tile_size()
@@ -2456,6 +2540,18 @@ void gfx_shutdown(void) {
         if (gfx_rapi->shutdown) gfx_rapi->shutdown();
         gfx_rapi = NULL;
     }
+
+    // The backend has just destroyed every shader program, so every ColorCombiner
+    // pointing at one is now dangling. Drop the pool with them rather than
+    // leaving it to be re-used across a re-init -- mod_cache.c tears graphics
+    // down mid-startup, and gfx_init() would otherwise come back up with cc->prg
+    // pointers into a pool the backend has already reset.
+    memset(color_combiner_pool, 0, sizeof(color_combiner_pool));
+    color_combiner_pool_size = 0;
+    sPrevCombiner = NULL;
+    sTriState.valid = false;
+    sTriState.comb = NULL;
+    rendering_state.shader_program = NULL;
     if (gfx_wapi) {
         if (gfx_wapi->shutdown) gfx_wapi->shutdown();
         gfx_wapi = NULL;

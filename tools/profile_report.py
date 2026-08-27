@@ -46,8 +46,9 @@ COUNTERS = ["subframes", "draws", "tris", "verts", "triscliprej", "triscullrej",
             "texloads", "texbytes",
             "texflushes", "binds", "bindskips", "impskips", "shaders", "objects",
             "players", "hookcalls", "hookbhv", "fieldgets", "fieldsets", "fieldmemo",
-            "objsdrawn", "objsculled", "objsculledsize",
-            "dlnodes", "dldistinct", "renderskips"]
+            "objsdrawn", "objsculled", "objsculledsize", "staticgeoculled",
+            "dlnodes", "dldistinct", "renderskips",
+            "shadercompiles", "shadercachehits", "shaderevictions"]
 
 # Why each batch split happened. Absent from older logs; the printer skips
 # whatever a given CSV does not carry.
@@ -131,6 +132,29 @@ def report_frames(meta, rows, top_n):
             continue
         vals = [r[key] for r in rows]
         print(f"  {key:12} mean {mean(vals):10.1f}   p50 {pct(vals,50):8}   max {max(vals):8}")
+
+    # Shader compilation is rare and enormous, so a per-frame mean says nothing
+    # useful about it -- run 23 had 57 compiles in 49,264 frames and each one
+    # cost 150-215ms. Totals, and the cost of the frames they landed in, are what
+    # says whether the on-disk binary cache is doing its job: a warm cache should
+    # show compiles at zero and every program arriving as a hit.
+    if "shadercompiles" in rows[0]:
+        compiles = sum(r.get("shadercompiles", 0) for r in rows)
+        hits     = sum(r.get("shadercachehits", 0) for r in rows)
+        evicts   = sum(r.get("shaderevictions", 0) for r in rows)
+        if compiles or hits or evicts:
+            print("\nshader programs:")
+            print(f"  compiled from source {compiles:6}      served from cache {hits:6}"
+                  f"      evicted {evicts:6}")
+            hot = [r for r in rows if r.get("shadercompiles", 0)]
+            if hot:
+                cost = sum(r["us_gfxdl"] for r in hot)
+                base = mean([r["us_gfxdl"] for r in rows if not r.get("shadercompiles", 0)] or [0])
+                print(f"  the {len(hot)} frames that compiled spent {cost/1e6:.2f}s in the DL path"
+                      f" (baseline {base/1000:.1f}ms/frame)")
+            if evicts:
+                print("  evictions are non-zero: the 64-slot pool is turning over, so"
+                      " compiles recur rather than being one-off per device")
 
     present = [k for k in FLUSH_CAUSES if k in rows[0]]
     if present:

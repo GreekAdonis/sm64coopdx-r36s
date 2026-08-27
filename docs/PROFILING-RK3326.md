@@ -125,6 +125,21 @@ How to read the result:
 - **`texflushes` is ever non-zero** — the texture cache is thrashing, which
   makes `texloads`/`texbytes` explode. That is a fixable configuration
   problem, not a hardware limit.
+- **`shadercompiles` is non-zero** — the driver compiled and linked a shader on
+  the game thread, which costs 150-215ms each on Mali-G31. The report prints
+  these as a total rather than a per-frame mean, because they are rare and
+  enormous: run 23 had 57 of them in 49,264 frames and they accounted for 7.3
+  seconds of freeze. On a device that has played before, the on-disk cache
+  (`shader_cache.bin`, next to `sm64config.txt`) should make this zero and
+  `shadercachehits` non-zero instead.
+- **`shaderevictions` is non-zero** — more than 64 distinct colour combiners are
+  in play, so the pool is turning over and compiles will recur instead of being
+  a one-off per device. `CC_MAX_SHADERS` is the number to raise.
+- **`triscliprej` is comparable to or larger than `tris`** — geometry is being
+  transformed and lit and then discarded for being off screen. `staticgeoculled`
+  says how much the level-geometry cull is already removing; if it is zero while
+  `triscliprej` is high, the level's display lists are too coarse for the cull
+  to get a grip on (one list covering the whole level can never be rejected).
 - **A large share of samples in `libmali`** — the driver is doing the work,
   which usually means state changes or uploads rather than shading.
 

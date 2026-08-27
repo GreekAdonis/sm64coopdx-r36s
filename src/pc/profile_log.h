@@ -78,6 +78,22 @@ struct ProfileCounters {
     u32 flushBufferFull; // hit MAX_BUFFERED triangles
     u32 flushCombiner;   // a new colour combiner had to be built
 
+    // What a flushCombiner actually cost. Run 23 read flushCombiner as a proxy
+    // for "the driver compiled a shader", which held only because both pools
+    // were cold and growing together for the whole session -- a combiner miss
+    // that finds its program still resident is nearly free, and once the pools
+    // start evicting the two stop tracking each other. Counting them apart is
+    // what tells the two cases apart afterwards.
+    //
+    // shaderCompiles is the expensive one: ~150-215us*1000 each on Mali-G31.
+    // shaderCacheHits is the same program arriving as a stored binary instead.
+    // shaderEvictions being non-zero at all means the 64-slot pool is now
+    // turning over, which is the point at which compiles stop being a one-off
+    // per device and become recurring.
+    u32 shaderCompiles;
+    u32 shaderCacheHits;
+    u32 shaderEvictions;
+
     // The same draws and texture splits, divided by whether the pass they belong
     // to can be reordered at all.
     //
@@ -123,6 +139,11 @@ struct ProfileCounters {
     // its keep or just costing a divide per object.
     u32 objsCulled;
     u32 objsCulledSize;
+    // Static display lists the level's own geometry cull removed -- the same
+    // saving as objsCulled, for the geometry that was never tested at all before
+    // geo_dl_is_in_view() existed. Against triscliprej, which is what it is meant
+    // to bring down, this says whether the cull is finding anything.
+    u32 staticGeoCulled;
     u32 dlNodes;         // display lists appended to the master lists
     u32 dlDistinct;      // distinct display list pointers among them
 
