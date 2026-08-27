@@ -19,7 +19,7 @@ get_controls
 # Variables
 GAMEDIR="/$directory/ports/sm64coopdx"
 CONFDIR="$GAMEDIR/conf"
-ARGS="--fullscreen"
+ARGS="--fullscreen --savepath $CONFDIR"
 
 # CD and set permissions
 cd $GAMEDIR
@@ -51,7 +51,7 @@ fi
 
 ## Extract the files
 if [ -f "$GAMEDIR/files.zip" ]; then
-  if unzip "$GAMEDIR/files.zip" -d "$GAMEDIR"; then
+  if unzip -o "$GAMEDIR/files.zip" -d "$GAMEDIR"; then
     rm "$GAMEDIR/files.zip"
   else
     pm_message "Failed to extract files.zip"
