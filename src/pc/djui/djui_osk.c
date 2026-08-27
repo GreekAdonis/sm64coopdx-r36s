@@ -41,7 +41,7 @@ static const char* sOskPhrases[OSK_PHRASE_COUNT] = {
     [OSK_PHRASE_TP]          = "/tp",
 };
 
-#define OSK_PHRASE_COLS 5
+#define OSK_PHRASE_COLS 4
 
 struct OskKey {
     const char* label;
@@ -234,8 +234,7 @@ static void djui_osk_move_cursor(s32 dRow, s32 dCol) {
     }
 }
 
-static u8 djui_osk_get_direction(void) {
-    OSContPad* pad = &gInteractablePad;
+static u8 djui_osk_get_direction(OSContPad* pad) {
     if (pad->stick_x < -OSK_STICK_DEADZONE) { return 1; }
     if (pad->stick_x >  OSK_STICK_DEADZONE) { return 2; }
     if (pad->stick_y < -OSK_STICK_DEADZONE) { return 3; }
@@ -251,11 +250,17 @@ static void djui_osk_consume_input(void) {
     gInteractablePad.button = 0;
     gInteractablePad.stick_x = 0;
     gInteractablePad.stick_y = 0;
+    // Also consume the keyboard-emulation buttons the OSK acted on, so the
+    // later interactable pass doesn't re-deliver them. L/R triggers (shift)
+    // are left intact since that's a held state owned by the keyboard module.
+    djui_interactable_consume_osk_buttons();
 }
 
 void djui_osk_update(void) {
     bool wasOskActive = sOskActive;
-    u16 button = gInteractablePad.button;
+    OSContPad pad;
+    djui_interactable_get_merged_pad(&pad);
+    u16 button = pad.button;
 
     sOskActive = djui_osk_is_text_input_active();
     if (!sOskActive) {
@@ -282,7 +287,7 @@ void djui_osk_update(void) {
 
     u16 pressed = button & ~sLastPadButton;
 
-    u8 dir = djui_osk_get_direction();
+    u8 dir = djui_osk_get_direction(&pad);
     if (dir != sLastDir) {
         if (dir != 0) {
             switch (dir) {
@@ -454,7 +459,7 @@ void djui_osk_render(void) {
     if (djui_osk_focus_is_chat()) {
         f32 phraseW = keyW * OSK_PHRASE_COLS + gap * (OSK_PHRASE_COLS - 1);
         f32 px = x0 + (OSK_COLS - OSK_PHRASE_COLS) * (keyW + gap);
-        f32 py0 = y0 + pad + (OSK_ROWS - 1) * (keyH + gap) + gap;
+        f32 py0 = y0 + pad + (OSK_ROWS - 1) * (keyH + gap) + keyH + gap;
 
         for (s32 i = 0; i < OSK_PHRASE_COUNT; i++) {
             f32 py = py0 + i * (keyH + gap);
@@ -473,17 +478,11 @@ void djui_osk_render(void) {
             djui_hud_render_rect(px, py, phraseW, keyH);
 
             const char* label = sOskPhrases[i];
-            f32 tw, th;
-            djui_hud_measure_text(label, &tw, &th);
-            f32 scale = 1.0f;
-            f32 maxW = phraseW - 8.0f;
-            if (tw * scale > maxW) { scale = maxW / tw; }
-            if (scale > 1.15f) { scale = 1.15f; }
-            if (scale < 0.4f) { scale = 0.4f; }
 
+            djui_hud_set_color(255, 255, 255, 255);
             djui_hud_set_text_alignment(0.5f, 0.5f);
             djui_hud_set_text_color(250, 250, 250, 255);
-            djui_hud_print_text(label, px + phraseW / 2.0f, py + keyH / 2.0f, scale, scale);
+            djui_hud_print_text(label, px + phraseW / 2.0f, py + keyH / 2.0f, 1.0f, 1.0f);
         }
     }
 }

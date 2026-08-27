@@ -47,6 +47,8 @@ struct DjuiInteractable {
 
 extern bool gInteractableOverridePad;
 extern OSContPad gInteractablePad;
+void djui_interactable_get_merged_pad(OSContPad* out);
+void djui_interactable_consume_osk_buttons(void);
 extern struct DjuiBase* gDjuiHovered;
 extern struct DjuiBase* gDjuiCursorDownOn;
 extern struct DjuiBase* gInteractableFocus;

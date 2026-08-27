@@ -455,6 +455,31 @@ void djui_interactable_update_pad(void) {
     lastPadHoldDirection = padHoldDirection;
 }
 
+// Returns the interactable pad with keyboard-emulation input (sKeyboardButtons
+// and sKeyboardHoldDirection) already merged in. The djui OSK reads this instead
+// of gInteractablePad directly, because djui_osk_update() runs before
+// djui_interactable_update_pad() has OR'd those bits into the shared pad.
+void djui_interactable_get_merged_pad(OSContPad* out) {
+    *out = gInteractablePad;
+    out->button |= sKeyboardButtons;
+    switch (sKeyboardHoldDirection) {
+        case PAD_HOLD_DIR_UP:    out->stick_x = 0;   out->stick_y = -64; break;
+        case PAD_HOLD_DIR_DOWN:  out->stick_x = 0;   out->stick_y =  64; break;
+        case PAD_HOLD_DIR_LEFT:  out->stick_x = -64; out->stick_y =   0; break;
+        case PAD_HOLD_DIR_RIGHT: out->stick_x =  64; out->stick_y =   0; break;
+        default: break;
+    }
+}
+
+// Clears the discrete keyboard-emulation buttons the OSK consumes (activate,
+// back, start, d-pad) so the later interactable pass doesn't double-deliver
+// them. L/R triggers (shift) are intentionally left intact, since shift is a
+// held state owned by the keyboard module and must persist across frames.
+void djui_interactable_consume_osk_buttons(void) {
+    sKeyboardButtons &= ~(PAD_BUTTON_A | PAD_BUTTON_B | PAD_BUTTON_START |
+                          U_JPAD | D_JPAD | L_JPAD | R_JPAD);
+}
+
 void djui_interactable_update(void) {
     // update pad
     djui_interactable_update_pad();
