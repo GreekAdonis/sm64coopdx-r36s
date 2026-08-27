@@ -1,6 +1,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 #include "dynos.cpp.h"
@@ -75,6 +76,17 @@ static bool sDynosCustomTexsByRawPtrDirty = true;
 
 static void DynOS_Tex_InvalidateRawPtrIndex() {
     sDynosCustomTexsByRawPtrDirty = true;
+}
+
+static std::unordered_map<std::string_view, DataNode<TexData> *>& DynosTexsByName() {
+    static std::unordered_map<std::string_view, DataNode<TexData> *> sDynosTexsByName;
+    return sDynosTexsByName;
+}
+
+static bool sDynosTexsByNameDirty = true;
+
+static void DynOS_Tex_InvalidateNameIndex() {
+    sDynosTexsByNameDirty = true;
 }
 
 static bool sDynosDumpTextureCache = false;
@@ -314,6 +326,7 @@ void DynOS_Tex_Valid(GfxData* aGfxData) {
     for (auto &_Texture : aGfxData->mTextures) {
         DynosValidTextures().insert(_Texture);
     }
+    DynOS_Tex_InvalidateNameIndex();
     gfx_texture_state_invalidate();
 }
 
@@ -331,6 +344,7 @@ void DynOS_Tex_Update() {
         DynosValidTextures().erase(_Texture);
     }
     schedule.clear();
+    DynOS_Tex_InvalidateNameIndex();
     gfx_texture_state_invalidate();
 }
 
@@ -456,6 +470,7 @@ void DynOS_Tex_Activate(DataNode<TexData>* aNode, bool aCustomTexture) {
     // A texture pointer now resolves somewhere else; the renderer caches that
     // resolution across frames, so tell it to redo it.
     DynOS_Tex_InvalidateRawPtrIndex();
+    DynOS_Tex_InvalidateNameIndex();
     gfx_texture_state_invalidate();
 }
 
@@ -473,6 +488,7 @@ void DynOS_Tex_Deactivate(DataNode<TexData>* aNode) {
         }
     }
     DynOS_Tex_InvalidateRawPtrIndex();
+    DynOS_Tex_InvalidateNameIndex();
     gfx_texture_state_invalidate();
 
     // un-override texture
@@ -607,17 +623,44 @@ bool DynOS_Tex_GetFromData(const Texture *aTex, struct TextureInfo* aOutTexInfo)
     return false;
 }
 
+// Name -> node index over DynosCustomTexs() and then DynosValidTextures().
+//
+// DynOS_Lua_Tex_RetrieveNode() compared the name against every custom texture
+// and then against every valid texture, once per call, and both of its callers
+// -- DynOS_Tex_Override_Set() and DynOS_Tex_Override_Reset() -- are Lua-facing
+// and reached from HUD render callbacks.
+//
+// Search order is preserved by build order: customs are inserted first and
+// emplace() never overwrites, so a name held by both containers still resolves
+// to the custom node, and within each container the first entry wins exactly as
+// the linear scans did. DynosValidTextures() is a std::set of pointers, so its
+// "first" is by pointer value -- arbitrary, but iterating it in the same order
+// reproduces whatever the scan would have picked.
+//
+// Keys are string_views over each node's own mName rather than over the
+// std::string in the DynosCustomTexs() vector: the two always hold the same
+// text (the vector entry is constructed from the node's name), but the node's
+// storage does not move when that vector reallocates.
 static DataNode<TexData> *DynOS_Lua_Tex_RetrieveNode(const char* aName) {
-    auto& _DynosCustomTexs = DynosCustomTexs();
-    for (auto &customTex : _DynosCustomTexs) {
-        if (customTex.first == aName) {
-            return customTex.second;
+    if (!aName) { return NULL; }
+
+    auto& _ByName = DynosTexsByName();
+    if (sDynosTexsByNameDirty) {
+        _ByName.clear();
+        for (auto &customTex : DynosCustomTexs()) {
+            auto& _Node = customTex.second;
+            if (!_Node) { continue; }
+            _ByName.emplace(std::string_view(_Node->mName.begin(), _Node->mName.Length()), _Node);
         }
+        for (DataNode<TexData>* _Node : DynosValidTextures()) {
+            if (!_Node) { continue; }
+            _ByName.emplace(std::string_view(_Node->mName.begin(), _Node->mName.Length()), _Node);
+        }
+        sDynosTexsByNameDirty = false;
     }
 
-    for (DataNode<TexData>* _Node : DynosValidTextures()) {
-        if (_Node->mName == aName) { return _Node; }
-    };
+    auto _It = _ByName.find(std::string_view(aName));
+    if (_It != _ByName.end()) { return _It->second; }
 
     return NULL;
 }

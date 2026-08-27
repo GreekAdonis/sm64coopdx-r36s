@@ -33,6 +33,36 @@ static std::vector<std::pair<std::string, void *>> &DynosCustomActors() {
 
 static std::map<struct GraphNode *, struct GraphNode *> sModifiedGraphNodes;
 
+// Graph node -> actor index, for the georef-less branch of
+// DynOS_Actor_GetActorGfx().
+//
+// When a graph node carries a georef the lookup is already a map probe. When it
+// does not -- which is the case for anything DynOS did not load from a pack --
+// the function fell through to a linear walk of every valid actor, on a path
+// reached per object from the renderer and from obj_set_model(). It is small
+// today (0.05% of samples in run 21's flood window) but it grows with the number
+// of actor packs loaded, which is exactly the situation the device struggles in.
+//
+// Built by iterating DynosValidActors() in its own order and never overwriting,
+// so the entry that answers is the one the walk would have returned first.
+// Values point at std::map nodes, which are stable while the element lives; the
+// index is dropped whenever an element is inserted, overwritten or erased.
+//
+// Note that DynOS_Actor_GetValidActors() hands out a non-const reference to the
+// same map. Its four callers in dynos_mgr_gfx.cpp only read mGfxData, so none of
+// them can invalidate this; anything added there that writes mGraphNode or
+// changes the map must call DynOS_Actor_InvalidateNodeIndex().
+static std::unordered_map<const GraphNode*, ActorGfx*>& DynosActorsByNode() {
+    static std::unordered_map<const GraphNode*, ActorGfx*> sDynosActorsByNode;
+    return sDynosActorsByNode;
+}
+
+static bool sDynosActorsByNodeDirty = true;
+
+static void DynOS_Actor_InvalidateNodeIndex() {
+    sDynosActorsByNodeDirty = true;
+}
+
 std::map<const void *, ActorGfx> &DynOS_Actor_GetValidActors() {
     return DynosValidActors();
 }
@@ -166,12 +196,20 @@ ActorGfx* DynOS_Actor_GetActorGfx(const GraphNode* aGraphNode) {
         return NULL;
     }
 
-    // Check graph node
-    for (const auto& _Actor : _ValidActors) {
-        if (_Actor.second.mGraphNode == aGraphNode) {
-            return (ActorGfx*)&_Actor.second;
+    // Check graph node -- see DynosActorsByNode() for why this is an index.
+    auto& _ByNode = DynosActorsByNode();
+    if (sDynosActorsByNodeDirty) {
+        _ByNode.clear();
+        for (auto& _Actor : _ValidActors) {
+            // A NULL node can never be queried: the early return above rejects it.
+            if (_Actor.second.mGraphNode == NULL) { continue; }
+            _ByNode.emplace(_Actor.second.mGraphNode, &_Actor.second);
         }
+        sDynosActorsByNodeDirty = false;
     }
+
+    auto _It = _ByNode.find(aGraphNode);
+    if (_It != _ByNode.end()) { return _It->second; }
 
     // No actor found
     return NULL;
@@ -181,6 +219,8 @@ void DynOS_Actor_Valid(const void* aGeoref, ActorGfx& aActorGfx) {
     if (aGeoref == NULL) { return; }
     auto& _ValidActors = DynosValidActors();
     _ValidActors[aGeoref] = aActorGfx;
+    // operator[] either inserts or overwrites an existing entry's mGraphNode.
+    DynOS_Actor_InvalidateNodeIndex();
     DynOS_Tex_Valid(aActorGfx.mGfxData);
 }
 
@@ -193,6 +233,7 @@ void DynOS_Actor_Invalid(const void* aGeoref, s32 aPackIndex) {
 
     DynOS_Tex_Invalid(it->second.mGfxData);
     _ValidActors.erase(aGeoref);
+    DynOS_Actor_InvalidateNodeIndex();
 }
 
 void DynOS_Actor_Override(struct Object* obj, void** aSharedChild) {
@@ -302,6 +343,7 @@ void DynOS_Actor_ModShutdown() {
             ++it;
         }
     }
+    DynOS_Actor_InvalidateNodeIndex();
 
     DynOS_Actor_Override_All();
 

@@ -1,3 +1,5 @@
+#include <unordered_set>
+
 #include "dynos.cpp.h"
 
 extern "C" {
@@ -19,6 +21,36 @@ static std::vector<OverrideLevelScript> &DynosOverrideLevelScripts() {
 std::vector<std::pair<std::string, GfxData *>> &DynOS_Lvl_GetArray() {
     static std::vector<std::pair<std::string, GfxData *>> sDynosCustomLevelScripts;
     return sDynosCustomLevelScripts;
+}
+
+// Membership filter for DynOS_Lvl_Override().
+//
+// That function runs per level-script command and walked every override entry
+// and then every script of every custom level -- a nested loop -- to discover,
+// almost always, that the command it was handed is a plain vanilla one that
+// matches nothing. It measured 0.16% of samples in run 21's flood window.
+//
+// This is deliberately a filter rather than a map, because the first loop cannot
+// be expressed as a lookup: it reassigns aCmd on a match and keeps going, so a
+// later entry can match the value an earlier one just produced, and the *last*
+// match wins rather than the first. Reproducing that with a map would mean
+// walking a chain and would be easy to get subtly wrong.
+//
+// A filter needs none of that. Every comparison in either loop is against a
+// pointer in this set, so if aCmd is not in the set neither loop can match on
+// its first iteration -- and since only a match mutates aCmd, neither can match
+// on any later one either. The loops are then provably no-ops and the function
+// is just `return aCmd`. When aCmd *is* in the set, the original code runs
+// unchanged.
+static std::unordered_set<const void *> &DynosLvlOverrideKeys() {
+    static std::unordered_set<const void *> sDynosLvlOverrideKeys;
+    return sDynosLvlOverrideKeys;
+}
+
+static bool sDynosLvlOverrideKeysDirty = true;
+
+static void DynOS_Lvl_InvalidateOverrideKeys() {
+    sDynosLvlOverrideKeysDirty = true;
 }
 
 LevelScript* DynOS_Lvl_GetScript(const char* aScriptEntryName) {
@@ -48,6 +80,7 @@ void DynOS_Lvl_ModShutdown() {
 
     auto& _OverrideLevelScripts = DynosOverrideLevelScripts();
     _OverrideLevelScripts.clear();
+    DynOS_Lvl_InvalidateOverrideKeys();
 }
 
 void DynOS_Lvl_Activate(s32 modIndex, const SysPath &aFilename, const char *aLevelName) {
@@ -76,6 +109,7 @@ void DynOS_Lvl_Activate(s32 modIndex, const SysPath &aFilename, const char *aLev
 
     // Add to levels
     _CustomLevelScripts.emplace_back(levelName, _Node);
+    DynOS_Lvl_InvalidateOverrideKeys();
     DynOS_Tex_Valid(_Node);
 
     // Override vanilla script
@@ -93,6 +127,7 @@ void DynOS_Lvl_Activate(s32 modIndex, const SysPath &aFilename, const char *aLev
 
     DynOS_Level_Override((void*)originalScript, newScriptNode->mData, modIndex);
     _OverrideLevelScripts.push_back({ originalScript, newScriptNode->mData, _Node});
+    DynOS_Lvl_InvalidateOverrideKeys();
 }
 
 GfxData* DynOS_Lvl_GetActiveGfx(void) {
@@ -174,6 +209,25 @@ double_break:
 
 void *DynOS_Lvl_Override(void *aCmd) {
     auto& _OverrideLevelScripts = DynosOverrideLevelScripts();
+
+    // See DynosLvlOverrideKeys(): anything not in the set matches nothing below.
+    auto& _Keys = DynosLvlOverrideKeys();
+    if (sDynosLvlOverrideKeysDirty) {
+        _Keys.clear();
+        for (auto& overrideStruct : _OverrideLevelScripts) {
+            _Keys.insert(overrideStruct.originalScript);
+            _Keys.insert(overrideStruct.newScript);
+        }
+        for (auto& script : DynOS_Lvl_GetArray()) {
+            if (!script.second) { continue; }
+            for (auto& s : script.second->mLevelScripts) {
+                if (s) { _Keys.insert(s->mData); }
+            }
+        }
+        sDynosLvlOverrideKeysDirty = false;
+    }
+    if (_Keys.find(aCmd) == _Keys.end()) { return aCmd; }
+
     for (auto& overrideStruct : _OverrideLevelScripts) {
         if (aCmd == overrideStruct.originalScript || aCmd == overrideStruct.newScript) {
             aCmd = (void*)overrideStruct.newScript;

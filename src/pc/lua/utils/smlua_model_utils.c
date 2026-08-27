@@ -467,12 +467,98 @@ static u16 sCustomModelsCount = 0;
 static u16 sMaxCustomModelsCount = CUSTOM_MODEL_CHUNK_SIZE;
 struct ModelUtilsInfo *sCustomModels = NULL;
 
+  ///////////////////////////////////
+ // loadedId -> extId reverse index //
+///////////////////////////////////
+
+// smlua_model_util_id_to_ext_id() used to scan all E_MODEL_MAX builtin models
+// and then every custom model, comparing loadedId. That matters more than its
+// own Lua binding suggests: it is also evaluated as an *argument* to
+// smlua_call_event_hooks(HOOK_OBJECT_SET_MODEL, ...) at both obj_set_model()
+// and spawn_object_at_origin(), so C argument evaluation ran the whole scan on
+// every model assignment and every object spawn -- including when no mod had
+// hooked the event at all and the dispatcher was about to do nothing.
+//
+// The index reproduces the scan's tie-break exactly: builtins are inserted
+// before customs and an occupied slot is never overwritten, so the entry that
+// answers is the one the linear scan would have reached first.
+//
+// loadedId is a u16 and UNLOADED_ID is 0, which the caller rejects before
+// looking anything up, so 0 is free to mark an empty slot.
+
+struct ModelExtIdIndex {
+    u32  mask;    // slotCount - 1; slotCount is always a power of two
+    u32* keys;    // loadedId, 0 = empty
+    u16* extIds;
+};
+
+static struct ModelExtIdIndex sExtIdIndex = { 0, NULL, NULL };
+static bool sExtIdIndexDirty = true;
+
+static void smlua_model_util_invalidate_ext_id_index(void) {
+    sExtIdIndexDirty = true;
+}
+
+static u32 smlua_model_id_hash(u32 id) {
+    // Knuth multiplicative. Ids are small and dense, so the high bits carry the
+    // entropy; taking them from the top of the product spreads them over slots.
+    return (id * 2654435761u) >> 16;
+}
+
+static void smlua_model_util_index_insert(u32 id, u16 extId) {
+    if (id == UNLOADED_ID) { return; }
+    struct ModelExtIdIndex* ix = &sExtIdIndex;
+    for (u32 i = smlua_model_id_hash(id) & ix->mask; ; i = (i + 1) & ix->mask) {
+        if (ix->keys[i] == id) { return; } // first insertion wins, matching the scan order
+        if (ix->keys[i] == 0)  { ix->keys[i] = id; ix->extIds[i] = extId; return; }
+    }
+}
+
+static void smlua_model_util_build_ext_id_index(void) {
+    struct ModelExtIdIndex* ix = &sExtIdIndex;
+    free(ix->keys);
+    free(ix->extIds);
+    ix->keys = NULL;
+    ix->extIds = NULL;
+    ix->mask = 0;
+
+    // At least half the slots stay empty, which both bounds probe length and
+    // guarantees the insert loop above always finds a free slot to stop on.
+    u32 entries = (u32) E_MODEL_MAX + (u32) sCustomModelsCount;
+    u32 slots = 16;
+    while (slots < entries * 2) { slots <<= 1; }
+
+    ix->keys = (u32*) calloc(slots, sizeof(u32));
+    ix->extIds = (u16*) calloc(slots, sizeof(u16));
+    if (!ix->keys || !ix->extIds) {
+        // Fall back to the linear scans permanently rather than retrying the
+        // allocation on every lookup.
+        free(ix->keys);
+        free(ix->extIds);
+        ix->keys = NULL;
+        ix->extIds = NULL;
+        sExtIdIndexDirty = false;
+        return;
+    }
+    ix->mask = slots - 1;
+
+    for (u32 i = 0; i < E_MODEL_MAX; i++) {
+        smlua_model_util_index_insert(sModels[i].loadedId, (u16) sModels[i].extId);
+    }
+    for (u32 i = 0; i < sCustomModelsCount; i++) {
+        smlua_model_util_index_insert(sCustomModels[i].loadedId, (u16) sCustomModels[i].extId);
+    }
+
+    sExtIdIndexDirty = false;
+}
+
 void smlua_model_util_initialize(void) {
     // Allocate the custom models array. We start off with a maximum of 256 custom models.
     sCustomModels = (struct ModelUtilsInfo *)calloc(sMaxCustomModelsCount, sizeof(struct ModelUtilsInfo));
 }
 
 void smlua_model_util_clear(void) {
+    smlua_model_util_invalidate_ext_id_index();
     sCustomModelsCount = 0;
     sMaxCustomModelsCount = CUSTOM_MODEL_CHUNK_SIZE;
     if (sCustomModels) { free(sCustomModels); }
@@ -504,13 +590,30 @@ u16 smlua_model_util_load(enum ModelExtendedId extId) {
     return (u16)id;
 }
 
-static void smlua_model_util_unregister_model_id(u32 id, struct ModelUtilsInfo *models, u32 count) {
+// Clears `id` from every entry except `keep`, and reports whether anything
+// actually changed.
+//
+// Skipping `keep` is what makes the caller's invalidation precise rather than
+// merely correct. The original cleared `keep` too and then immediately wrote the
+// same id back, so a mod calling obj_set_model_extended() with an already-loaded
+// model -- which reaches here through DynOS_Model_LoadCommon() on every call,
+// cache hit or not -- churned loadedId from id to 0 and back every frame. The
+// final state is identical either way: `keep` holds `id`, nothing else does.
+static bool smlua_model_util_unregister_model_id(u32 id, struct ModelUtilsInfo *models, u32 count, struct ModelUtilsInfo *keep) {
+    bool changed = false;
     for (u32 i = 0; i < count; i++) {
         struct ModelUtilsInfo *m = &models[i];
+        if (m == keep) { continue; }
         if (m->loadedId == id) {
             m->loadedId = UNLOADED_ID;
+            // id can itself be UNLOADED_ID -- DynOS_Model_LoadCommon() still
+            // calls through here when LoadCommonInternal() bailed before
+            // assigning one -- and clearing an already-clear entry changes
+            // nothing worth rebuilding the index for.
+            if (id != UNLOADED_ID) { changed = true; }
         }
     }
+    return changed;
 }
 
 // Links the regular model id created by DynOS to our models list
@@ -519,8 +622,9 @@ void smlua_model_util_register_model_id(u32 id, const void *asset) {
         for (u32 i = 0; i < E_MODEL_MAX; i++) {
             struct ModelUtilsInfo* m = &sModels[i];
             if (m->asset == asset) {
-                smlua_model_util_unregister_model_id(id, sModels, E_MODEL_MAX);
-                m->loadedId = id;
+                bool changed = smlua_model_util_unregister_model_id(id, sModels, E_MODEL_MAX, m);
+                if (m->loadedId != (u16) id) { m->loadedId = id; changed = true; }
+                if (changed) { smlua_model_util_invalidate_ext_id_index(); }
                 return;
             }
         }
@@ -528,8 +632,9 @@ void smlua_model_util_register_model_id(u32 id, const void *asset) {
         for (u32 i = 0; i < sCustomModelsCount; i++) {
             struct ModelUtilsInfo* m = &sCustomModels[i];
             if (m->asset == asset) {
-                smlua_model_util_unregister_model_id(id, sCustomModels, sCustomModelsCount);
-                m->loadedId = id;
+                bool changed = smlua_model_util_unregister_model_id(id, sCustomModels, sCustomModelsCount, m);
+                if (m->loadedId != (u16) id) { m->loadedId = id; changed = true; }
+                if (changed) { smlua_model_util_invalidate_ext_id_index(); }
                 return;
             }
         }
@@ -551,7 +656,18 @@ u16 smlua_model_util_ext_id_to_id(enum ModelExtendedId extId) {
 enum ModelExtendedId smlua_model_util_id_to_ext_id(u16 id) {
     if (!id) { return E_MODEL_NONE; }
 
-    // Check built-in models
+    if (sExtIdIndexDirty) { smlua_model_util_build_ext_id_index(); }
+
+    struct ModelExtIdIndex* ix = &sExtIdIndex;
+    if (ix->keys) {
+        // Terminates on the empty slot the build guarantees exists.
+        for (u32 i = smlua_model_id_hash(id) & ix->mask; ; i = (i + 1) & ix->mask) {
+            if (ix->keys[i] == 0)  { return E_MODEL_ERROR_MODEL; }
+            if (ix->keys[i] == id) { return (enum ModelExtendedId) ix->extIds[i]; }
+        }
+    }
+
+    // The index could not be allocated -- original scans.
     for (u32 i = 0; i < E_MODEL_MAX; i++) {
         struct ModelUtilsInfo* m = &sModels[i];
         if (m->loadedId == id) {
@@ -559,7 +675,6 @@ enum ModelExtendedId smlua_model_util_id_to_ext_id(u16 id) {
         }
     }
 
-    // Check custom models
     for (u32 i = 0; i < sCustomModelsCount; i++) {
         struct ModelUtilsInfo* m = &sCustomModels[i];
         if (m->loadedId == id) {
@@ -618,6 +733,7 @@ enum ModelExtendedId smlua_model_util_get_id(const char* name) {
 
     // Allocate custom model
     u16 customIndex = sCustomModelsCount++;
+    smlua_model_util_invalidate_ext_id_index();
     struct ModelUtilsInfo* info = &sCustomModels[customIndex];
     info->asset = asset;
     info->loadedId = UNLOADED_ID;

@@ -1,3 +1,6 @@
+#include <string_view>
+#include <unordered_map>
+
 #include "dynos.cpp.h"
 extern "C" {
 #include "include/types.h"
@@ -2448,16 +2451,44 @@ static const struct BuiltinTexInfo sDynosBuiltinTexs[] = {
 #endif
 };
 
-const Texture* DynOS_Builtin_Tex_GetFromName(const char* aDataName) {
-    size_t count = sizeof(sDynosBuiltinTexs) / (sizeof(struct BuiltinTexInfo));
-    for (size_t i = 0; i < count; i++) {
-        const struct BuiltinTexInfo* info = &sDynosBuiltinTexs[i];
-        if (!strcmp(info->info.name, aDataName)) {
-            return (const Texture*)info->info.texture;
+// Name -> entry index over sDynosBuiltinTexs.
+//
+// The table holds roughly 2,340 entries and the lookup was a strcmp against
+// every one of them until it hit. That is reached from Lua on the texture-override path
+// (DynOS_Tex_Override_Set/Reset), which HUD mods call while rendering, and it
+// measured 0.31% of all main-thread CPU in run 21's flood window.
+//
+// The table is `static const` and nothing writes to it, so unlike the other
+// DynOS indexes this one needs no invalidation -- build it once, on first use.
+// Keys are string_views over the table's own string literals, which have static
+// lifetime, so nothing is copied and no allocation happens per lookup.
+// emplace() keeps the first entry for a duplicate name, which is the entry the
+// linear scan returned -- seven names really are duplicated in the table, so
+// that tie-break is load-bearing rather than theoretical.
+static const std::unordered_map<std::string_view, const struct BuiltinTexInfo*>& DynOS_Builtin_Tex_ByName() {
+    static std::unordered_map<std::string_view, const struct BuiltinTexInfo*> sByName = [] {
+        std::unordered_map<std::string_view, const struct BuiltinTexInfo*> map;
+        size_t count = sizeof(sDynosBuiltinTexs) / (sizeof(struct BuiltinTexInfo));
+        map.reserve(count * 2);
+        for (size_t i = 0; i < count; i++) {
+            const struct BuiltinTexInfo* info = &sDynosBuiltinTexs[i];
+            map.emplace(std::string_view(info->info.name), info);
         }
-    }
+        return map;
+    }();
+    return sByName;
+}
 
-    return NULL;
+static const struct BuiltinTexInfo* DynOS_Builtin_Tex_FindByName(const char* aDataName) {
+    if (!aDataName) { return NULL; }
+    const auto& map = DynOS_Builtin_Tex_ByName();
+    auto it = map.find(std::string_view(aDataName));
+    return (it != map.end()) ? it->second : NULL;
+}
+
+const Texture* DynOS_Builtin_Tex_GetFromName(const char* aDataName) {
+    const struct BuiltinTexInfo* info = DynOS_Builtin_Tex_FindByName(aDataName);
+    return info ? (const Texture*) info->info.texture : NULL;
 }
 
 const char* DynOS_Builtin_Tex_GetFromData(const Texture* aData) {
@@ -2485,15 +2516,8 @@ const char* DynOS_Builtin_Tex_GetNameFromFileName(const char* aDataName) {
 }
 
 const struct TextureInfo* DynOS_Builtin_Tex_GetInfoFromName(const char* aDataName) {
-    size_t count = sizeof(sDynosBuiltinTexs) / (sizeof(struct BuiltinTexInfo));
-    for (size_t i = 0; i < count; i++) {
-        const struct BuiltinTexInfo* info = &sDynosBuiltinTexs[i];
-        if (!strcmp(info->info.name, aDataName)) {
-            return &info->info;
-        }
-    }
-
-    return NULL;
+    const struct BuiltinTexInfo* info = DynOS_Builtin_Tex_FindByName(aDataName);
+    return info ? &info->info : NULL;
 }
 
 const struct TextureInfo* DynOS_Builtin_Tex_GetInfoFromData(const Texture* aData) {

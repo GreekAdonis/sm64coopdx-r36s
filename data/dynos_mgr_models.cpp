@@ -1,4 +1,5 @@
 #include <vector>
+#include <unordered_map>
 #include "dynos.cpp.h"
 
 extern "C" {
@@ -26,6 +27,56 @@ static struct DynamicPool* sModelPools[MODEL_POOL_MAX] = { 0 };
 static std::map<void*, struct ModelInfo> sAssetMap[MODEL_POOL_MAX];
 static std::map<u32, std::vector<struct ModelInfo>> sIdMap;
 static std::map<u32, u32> sOverwriteMap;
+
+// Reverse index over sIdMap for the graph-node lookups.
+//
+// sIdMap is a std::map, so every pass over it is a red-black tree walk: one
+// dependent load per node, over ModelInfo vectors scattered across the heap.
+// DynOS_Model_GetIdFromGraphNode() paid that walk *twice* on every call -- once
+// to find the id whose newest entry owns the node, then again inside
+// DynOS_Model_GetIdFromGeoRef() to find the lowest id sharing that node's
+// georef. Neither pass can stop early: the `id > lowest` guard only suppresses
+// further *updates*, so the iterator still visits every entry either way. The
+// function is reached from Lua through obj_get_model_id_extended() and
+// obj_has_model_extended(), which mods call per object, and it measured 0.68%
+// of all main-thread CPU in run 21's flood window.
+//
+// Both passes answer "lowest id whose sIdMap[id].back() matches X" for a
+// different X, so both collapse to a hash probe against a map built by one
+// ascending walk. std::map iterates in ascending key order and emplace() keeps
+// the first insertion for a key, so "first inserted" is exactly "lowest id".
+//
+// Ids above 9999 are deliberately excluded: `lowest` starts at 9999 in both
+// original loops, so `id > lowest` skipped them before anything was compared.
+// Indexing them would make the two disagree.
+#define MODEL_ID_SEARCH_MAX 9999
+
+static std::unordered_map<const struct GraphNode*, u32> sNodeToLowestId;
+static std::unordered_map<const void*, u32> sGeorefToLowestId;
+static bool sModelIndexDirty = true;
+
+static void DynOS_Model_InvalidateIndex() {
+    sModelIndexDirty = true;
+}
+
+static void DynOS_Model_RebuildIndex() {
+    sNodeToLowestId.clear();
+    sGeorefToLowestId.clear();
+    for (auto& it : sIdMap) {
+        if (it.first > MODEL_ID_SEARCH_MAX) { break; } // ascending, so nothing below follows
+        if (!it.second.size() || it.second.empty()) { continue; }
+        auto& node = it.second.back();
+        // LoadCommonInternal rejects a NULL node before pushing, so this never
+        // fires; without it a NULL would be dereferenced while building an index
+        // for a call that might never have reached the georef pass at all.
+        if (!node.graphNode) { continue; }
+        sNodeToLowestId.emplace(node.graphNode, it.first);
+        if (node.graphNode->georef) {
+            sGeorefToLowestId.emplace((const void*) node.graphNode->georef, it.first);
+        }
+    }
+    sModelIndexDirty = false;
+}
 
 static u32 find_empty_id(bool aIsPermanent) {
     u32 id = aIsPermanent ? 9999 : VANILLA_ID_END + 1;
@@ -129,6 +180,7 @@ static struct GraphNode* DynOS_Model_LoadCommonInternal(u32* aId, enum ModelPool
 
     // store in maps
     sIdMap[*aId].push_back(info);
+    DynOS_Model_InvalidateIndex();
     map[aAsset] = info;
 
     return node;
@@ -183,38 +235,28 @@ struct GraphNode* DynOS_Model_GetGeo(u32 aId) {
     return vec.back().graphNode;
 }
 
-static u32 DynOS_Model_GetIdFromGeoRef(u32 aIndex, void* aGeoRef) {
-    u32 lowest = 9999;
-    for (auto& it : sIdMap) {
-        u32 id = it.first;
-        if (id > lowest) { continue; }
-        if (!it.second.size() || it.second.empty()) { continue; }
-        auto& node = it.second.back();
-        if (aGeoRef == node.graphNode->georef) {
-            lowest = id;
-        }
-    }
-    if (lowest < 9999) { return lowest; }
-    return aIndex;
-}
-
 u32 DynOS_Model_GetIdFromGraphNode(struct GraphNode* aNode) {
-    u32 lowest = 9999;
-    void* georef = NULL;
-    for (auto& it : sIdMap) {
-        u32 id = it.first;
-        if (id > lowest) { continue; }
-        if (!it.second.size() || it.second.empty()) { continue; }
-        auto& node = it.second.back();
-        if (aNode == node.graphNode) {
-            lowest = id;
-            georef = (void*)node.graphNode->georef;
-        }
+    // See sNodeToLowestId for why this is an index rather than two tree walks.
+    // The georef the original read off the matched entry is node.graphNode's,
+    // and node.graphNode == aNode on a hit, so aNode->georef is the same value.
+    if (sModelIndexDirty) { DynOS_Model_RebuildIndex(); }
+
+    auto nodeIt = sNodeToLowestId.find(aNode);
+    if (nodeIt == sNodeToLowestId.end()) {
+        // No entry owns this node, so `lowest` stayed 9999 and `georef` NULL.
+        return MODEL_ERROR_MODEL;
     }
+
+    u32 lowest = nodeIt->second;
+    const void* georef = (const void*) aNode->georef;
     if (georef) {
-        lowest = DynOS_Model_GetIdFromGeoRef(lowest, georef);
+        // DynOS_Model_GetIdFromGeoRef() restarts from 9999 rather than from the
+        // id just found, and falls back to it when nothing matches.
+        auto georefIt = sGeorefToLowestId.find(georef);
+        if (georefIt != sGeorefToLowestId.end()) { lowest = georefIt->second; }
     }
-    if (lowest < 9999) { return lowest; }
+
+    if (lowest < MODEL_ID_SEARCH_MAX) { return lowest; }
     return MODEL_ERROR_MODEL;
 }
 
@@ -289,4 +331,9 @@ void DynOS_Model_ClearPool(enum ModelPool aModelPool) {
     }
 
     assetMap.clear();
+
+    // Required, not just tidy: dynamic_pool_free_pool() above releases the
+    // GraphNodes these entries point at, and a later allocation can reuse an
+    // address. A stale index would then answer for a node that no longer exists.
+    DynOS_Model_InvalidateIndex();
 }
