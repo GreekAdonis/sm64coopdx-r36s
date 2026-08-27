@@ -793,18 +793,23 @@ endif
 SDLCONFIG := $(CROSS)sdl2-config
 BACKEND_CFLAGS += -DHAVE_SDL2=1
 
+# Get SDL2 flags, with fallback to pkg-config if sdl2-config not found
+SDL2_CFLAGS_CMD = $(shell $(SDLCONFIG) --cflags 2>/dev/null || pkg-config --cflags sdl2 2>/dev/null || echo "-I/usr/include/SDL2")
+SDL2_LIBS_CMD = $(shell $(SDLCONFIG) --libs 2>/dev/null || pkg-config --libs sdl2 2>/dev/null || echo "-lSDL2")
+SDL2_STATIC_LIBS_CMD = $(shell $(SDLCONFIG) --static-libs 2>/dev/null || echo "$(SDL2_LIBS_CMD)")
+
 ifeq ($(OSX_BUILD),1)
   # on OSX at least the homebrew version of sdl-config gives include path as `.../include/SDL2` instead of `.../include`
   OSX_PREFIX := $(shell $(SDLCONFIG) --prefix)
-  BACKEND_CFLAGS += -I$(OSX_PREFIX)/include $(shell $(SDLCONFIG) --cflags)
+  BACKEND_CFLAGS += -I$(OSX_PREFIX)/include $(SDL2_CFLAGS_CMD)
 else
-  BACKEND_CFLAGS += `$(SDLCONFIG) --cflags`
+  BACKEND_CFLAGS += $(SDL2_CFLAGS_CMD)
 endif
 
 ifeq ($(WINDOWS_BUILD),1)
-  BACKEND_LDFLAGS += `$(SDLCONFIG) --static-libs` -lsetupapi -luser32 -limm32 -lole32 -loleaut32 -lshell32 -lshlwapi -lwinmm -lversion
+  BACKEND_LDFLAGS += $(SDL2_STATIC_LIBS_CMD) -lsetupapi -luser32 -limm32 -lole32 -loleaut32 -lshell32 -lshlwapi -lwinmm -lversion
 else
-  BACKEND_LDFLAGS += `$(SDLCONFIG) --libs`
+  BACKEND_LDFLAGS += $(SDL2_LIBS_CMD)
 endif
 
 C_DEFINES += $(foreach d,$(DEFINES),-D$(d))

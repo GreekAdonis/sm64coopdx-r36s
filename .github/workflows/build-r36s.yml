@@ -28,48 +28,75 @@ jobs:
 
       - name: Build and package
         run: |
-          docker run --rm --platform linux/arm64 \
-            -v "$PWD":/build -w /build debian:bullseye bash -lc '
-            set -e
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get update
-            apt-get install -y --no-install-recommends \
-              build-essential python3 libglew-dev libsdl2-dev libz-dev \
-              libcurl4-openssl-dev bsdmainutils file binutils zip
-            # TARGET_RK3326 implies HANDHELD=1 (and DISCORD_SDK=0). Building with
-            # plain HANDHELD=1 still works, but leaves OPT_FLAGS at a generic -O2
-            # with no CPU tuning at all: on an aarch64 host the Makefile's
-            # auto-detect sets TARGET_RPI=1, and the Pi path's aarch64 branch
-            # only sets -march/-mtune if /sys/firmware/devicetree/base/model
-            # names a Pi 3 or 4 -- that file does not exist in this container, so
-            # neither sub-branch matches. TARGET_RK3326 sets -mcpu=cortex-a35.
-            make TARGET_RK3326=1 UPDATER=0 \
-              EXTRA_CPP_FLAGS="-std=c++17" -j$(nproc)
-            file build/us_pc/sm64coopdx.arm
-            if ! file build/us_pc/sm64coopdx.arm | grep -q "ARM aarch64"; then
-              echo "ERROR: build output is not an aarch64 binary" >&2
-              exit 1
-            fi
-            echo "--- glibc requirements ---"
-            max=$(readelf --version-info build/us_pc/sm64coopdx.arm \
-              | grep -oE "GLIBC_2\.[0-9]+" | sed 's/GLIBC_//' \
-              | sort -u | sort -V | tail -1)
-            echo "max glibc required: $max"
-            if [ "$(printf "%s\n" 2.30 "$max" | sort -V | tail -1)" != "2.30" ]; then
-              echo "ERROR: binary requires glibc newer than the R36S userspace ($max)" >&2
-              exit 1
-            fi
-            echo "--- packaging ---"
-            rm -rf /tmp/dist
-            mkdir -p /tmp/dist/sm64coopdx
-            cd build/us_pc
-            zip -qr /tmp/dist/sm64coopdx/files.zip dynos lang mods palettes
-            mv sm64coopdx.arm /tmp/dist/sm64coopdx/sm64coopdx.aarch64
-            cd /build
-            cp -r port/sm64coopdx/. /tmp/dist/sm64coopdx/
-            cp "port/Super Mario 64 Co-op DX.sh" /tmp/dist/
-            cd /tmp/dist && zip -qr /build/sm64coopdx_r36s.zip .
-          '
+          # The container script is fed on stdin via a quoted heredoc rather
+          # than `bash -lc '...'`. A single-quoted command string breaks the
+          # moment the script contains an apostrophe (e.g. "Makefile's") -- the
+          # quote closes early, the rest of the line detaches from `docker run`,
+          # and `make` then runs on the bare runner instead of in the arm64
+          # container (no libsdl2-dev there -> "sdl2-config: not found" ->
+          # "<SDL2/SDL.h>: No such file"). A quoted heredoc has no such trap.
+          docker run --rm -i --platform linux/arm64 \
+            -v "$PWD":/build -w /build debian:bullseye bash -l <<'DOCKER'
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential python3 libglew-dev libsdl2-dev libz-dev \
+            libcurl4-openssl-dev bsdmainutils file binutils zip pkg-config
+
+          # The code #includes <SDL2/SDL.h>, so the *parent* of the SDL2 header
+          # dir has to be on the include path, not just the SDL2 dir itself.
+          # Resolve it and hand it (plus the SDL2 dir) to the build; fail loudly
+          # if libsdl2-dev did not actually land the header.
+          sdl2_incdir="$(pkg-config --variable=includedir sdl2 2>/dev/null || echo /usr/include)"
+          if [ ! -f "$sdl2_incdir/SDL2/SDL.h" ]; then
+            echo "::error::SDL2/SDL.h not found under $sdl2_incdir"
+            dpkg -L libsdl2-dev | grep -iE 'SDL\.h|sdl2-config|sdl2\.pc' || true
+            exit 1
+          fi
+
+          # TARGET_RK3326 implies HANDHELD=1 (and DISCORD_SDK=0). Building with
+          # plain HANDHELD=1 still works, but leaves OPT_FLAGS at a generic -O2
+          # with no CPU tuning at all: on an aarch64 host the Makefile's
+          # auto-detect sets TARGET_RPI=1, and the Pi path's aarch64 branch
+          # only sets -march/-mtune if /sys/firmware/devicetree/base/model
+          # names a Pi 3 or 4 -- that file does not exist in this container, so
+          # neither sub-branch matches. TARGET_RK3326 sets -mcpu=cortex-a35.
+          #
+          # Do NOT pass CFLAGS= on the make line: a command-line CFLAGS= replaces
+          # the Makefile's entire CFLAGS (every -Iinclude, -D define, -O2, -fPIE,
+          # ...). SDL2 include dirs go through EXTRA_INCLUDES, which the Makefile
+          # appends to INCLUDE_DIRS.
+          make TARGET_RK3326=1 UPDATER=0 \
+            EXTRA_CPP_FLAGS="-std=c++17" \
+            EXTRA_INCLUDES="$sdl2_incdir $sdl2_incdir/SDL2" \
+            -j"$(nproc)"
+
+          file build/us_pc/sm64coopdx.arm
+          if ! file build/us_pc/sm64coopdx.arm | grep -q "ARM aarch64"; then
+            echo "ERROR: build output is not an aarch64 binary" >&2
+            exit 1
+          fi
+          echo "--- glibc requirements ---"
+          max=$(readelf --version-info build/us_pc/sm64coopdx.arm \
+            | grep -oE 'GLIBC_2\.[0-9]+' | sed 's/GLIBC_//' \
+            | sort -u | sort -V | tail -1)
+          echo "max glibc required: $max"
+          if [ "$(printf '%s\n' 2.30 "$max" | sort -V | tail -1)" != "2.30" ]; then
+            echo "ERROR: binary requires glibc newer than the R36S userspace ($max)" >&2
+            exit 1
+          fi
+          echo "--- packaging ---"
+          rm -rf /tmp/dist
+          mkdir -p /tmp/dist/sm64coopdx
+          cd build/us_pc
+          zip -qr /tmp/dist/sm64coopdx/files.zip dynos lang mods palettes
+          mv sm64coopdx.arm /tmp/dist/sm64coopdx/sm64coopdx.aarch64
+          cd /build
+          cp -r port/sm64coopdx/. /tmp/dist/sm64coopdx/
+          cp "port/Super Mario 64 Co-op DX.sh" /tmp/dist/
+          cd /tmp/dist && zip -qr /build/sm64coopdx_r36s.zip .
+          DOCKER
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
