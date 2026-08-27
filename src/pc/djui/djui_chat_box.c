@@ -591,6 +591,7 @@ struct DjuiChatBox* djui_chat_box_create(void) {
     djui_interactable_hook_text_input(&chatInput->base, djui_chat_box_input_on_text_input);
     djui_interactable_hook_text_editing(&chatInput->base, djui_chat_box_input_on_text_editing);
     djui_interactable_hook_scroll(&chatInput->base, djui_chat_box_input_on_scroll);
+    chatInput->isChatInput = true;
     chatBox->chatInput = chatInput;
 
     gDjuiChatBox = chatBox;

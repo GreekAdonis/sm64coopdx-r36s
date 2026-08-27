@@ -28,6 +28,21 @@ enum OskKeyType {
     OSK_KEY_DONE,
 };
 
+enum OskPhrase {
+    OSK_PHRASE_CHAR_SELECT,
+    OSK_PHRASE_HAHAHA,
+    OSK_PHRASE_TP,
+    OSK_PHRASE_COUNT,
+};
+
+static const char* sOskPhrases[OSK_PHRASE_COUNT] = {
+    [OSK_PHRASE_CHAR_SELECT] = "/char-select",
+    [OSK_PHRASE_HAHAHA]      = "hahaha",
+    [OSK_PHRASE_TP]          = "/tp",
+};
+
+#define OSK_PHRASE_COLS 5
+
 struct OskKey {
     const char* label;
     u8 span;
@@ -65,6 +80,8 @@ static bool sOskActive = false;
 static u16 sLastPadButton = 0;
 static u16 sClosingButtons = 0;
 static bool sShiftHeld = false;
+static bool sPhraseMode = false;
+static s32 sCursorPhrase = 0;
 
 static char djui_osk_get_char(s32 row, s32 col) {
     char c = sOskCharRows[row][col];
@@ -98,6 +115,12 @@ static bool djui_osk_is_text_input_active(void) {
     return gInteractableFocus != NULL
         && gInteractableFocus->interactable != NULL
         && gInteractableFocus->interactable->on_text_input != NULL;
+}
+
+static bool djui_osk_focus_is_chat(void) {
+    if (!djui_osk_is_text_input_active()) { return false; }
+    struct DjuiInputbox* inputbox = (struct DjuiInputbox*) gInteractableFocus;
+    return inputbox->isChatInput;
 }
 
 static void djui_osk_get_key(s32 row, s32 col, struct OskKey* key) {
@@ -182,6 +205,24 @@ static s32 djui_osk_next_col(s32 row, s32 col, s32 step) {
 }
 
 static void djui_osk_move_cursor(s32 dRow, s32 dCol) {
+    if (sPhraseMode) {
+        if (dRow < 0) {
+            sPhraseMode = false;
+        } else if (dRow > 0) {
+            sCursorPhrase = (sCursorPhrase + 1) % OSK_PHRASE_COUNT;
+        } else if (dCol != 0) {
+            sPhraseMode = false;
+        }
+        return;
+    }
+
+    // Enter phrase mode when pressing down from the bottom action row (chat only).
+    if (dRow > 0 && sCursorRow == OSK_ROWS - 1 && djui_osk_focus_is_chat()) {
+        sPhraseMode = true;
+        sCursorPhrase = 0;
+        return;
+    }
+
     s32 newRow = sCursorRow + dRow;
     if (newRow < 0) { newRow = OSK_ROWS - 1; }
     if (newRow >= OSK_ROWS) { newRow = 0; }
@@ -223,6 +264,8 @@ void djui_osk_update(void) {
         sLastDir = 0;
         sBSHeld = false;
         sShiftHeld = false;
+        sPhraseMode = false;
+        sCursorPhrase = 0;
         sLastPadButton = button;
         return;
     }
@@ -231,6 +274,8 @@ void djui_osk_update(void) {
 
     if (!wasOskActive) {
         sLastPadButton = button;
+        sPhraseMode = false;
+        sCursorPhrase = 0;
         djui_osk_consume_input();
         return;
     }
@@ -263,17 +308,27 @@ void djui_osk_update(void) {
     }
 
     if (pressed & PAD_BUTTON_A) {
-        djui_osk_activate_key(sCursorRow, sCursorCol);
-        if (!djui_osk_is_text_input_active()) {
-            sOskActive = false;
-            sClosingButtons = button & PAD_BUTTON_A;
-            sLastPadButton = button;
-            djui_osk_consume_input();
-            return;
+        if (sPhraseMode) {
+            djui_interactable_on_text_input((char*) sOskPhrases[sCursorPhrase]);
+        } else {
+            djui_osk_activate_key(sCursorRow, sCursorCol);
+            if (!djui_osk_is_text_input_active()) {
+                sOskActive = false;
+                sClosingButtons = button & PAD_BUTTON_A;
+                sLastPadButton = button;
+                djui_osk_consume_input();
+                return;
+            }
         }
     }
 
     if (pressed & PAD_BUTTON_B) {
+        if (sPhraseMode) {
+            sPhraseMode = false;
+            sLastPadButton = button;
+            djui_osk_consume_input();
+            return;
+        }
         djui_interactable_on_key_down(SCANCODE_BACKSPACE);
         sBSHeld = true;
         sBSRepeatTimer = OSK_BS_INITIAL_DELAY;
@@ -393,6 +448,42 @@ void djui_osk_render(void) {
 
             keyStart += key.span;
             col += key.span - 1;
+        }
+    }
+
+    if (djui_osk_focus_is_chat()) {
+        f32 phraseW = keyW * OSK_PHRASE_COLS + gap * (OSK_PHRASE_COLS - 1);
+        f32 px = x0 + (OSK_COLS - OSK_PHRASE_COLS) * (keyW + gap);
+        f32 py0 = y0 + pad + (OSK_ROWS - 1) * (keyH + gap) + gap;
+
+        for (s32 i = 0; i < OSK_PHRASE_COUNT; i++) {
+            f32 py = py0 + i * (keyH + gap);
+            bool isSelected = sPhraseMode && sCursorPhrase == i;
+
+            struct DjuiColor bgColor = isSelected
+                ? (struct DjuiColor) { 70, 70, 70, 255 }
+                : (struct DjuiColor) { 35, 35, 35, 255 };
+            struct DjuiColor borderColor = isSelected
+                ? (struct DjuiColor) { 255, 255, 255, 255 }
+                : (struct DjuiColor) { 110, 110, 110, 255 };
+
+            djui_hud_set_color(borderColor.r, borderColor.g, borderColor.b, borderColor.a);
+            djui_hud_render_rect(px - 2.0f, py - 2.0f, phraseW + 4.0f, keyH + 4.0f);
+            djui_hud_set_color(bgColor.r, bgColor.g, bgColor.b, bgColor.a);
+            djui_hud_render_rect(px, py, phraseW, keyH);
+
+            const char* label = sOskPhrases[i];
+            f32 tw, th;
+            djui_hud_measure_text(label, &tw, &th);
+            f32 scale = 1.0f;
+            f32 maxW = phraseW - 8.0f;
+            if (tw * scale > maxW) { scale = maxW / tw; }
+            if (scale > 1.15f) { scale = 1.15f; }
+            if (scale < 0.4f) { scale = 0.4f; }
+
+            djui_hud_set_text_alignment(0.5f, 0.5f);
+            djui_hud_set_text_color(250, 250, 250, 255);
+            djui_hud_print_text(label, px + phraseW / 2.0f, py + keyH / 2.0f, scale, scale);
         }
     }
 }

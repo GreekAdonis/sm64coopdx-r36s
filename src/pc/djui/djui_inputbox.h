@@ -14,6 +14,7 @@ struct DjuiInputbox {
     void (*on_escape_press)(struct DjuiInputbox*);
     char* imeBuffer;
     u16 imePos;
+    bool isChatInput;
 };
 
 extern u8 gDjuiInputHeldShift;
