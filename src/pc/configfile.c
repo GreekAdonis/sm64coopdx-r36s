@@ -134,7 +134,7 @@ unsigned int configCullStaticGeo                  = 1;
 // spent 7.3 seconds of a half-hour session inside glCompileShader/glLinkProgram,
 // in stalls of up to 1.29s. 0 disables and always compiles from source.
 unsigned int configShaderCache                    = 1;
-unsigned int configLuaSkipUnconnectedPlayers      = 1;  // don't run per-Mario hooks for empty player slots
+unsigned int configLuaSkipUnconnectedPlayers      = 0;  // don't run per-Mario hooks for empty player slots
 unsigned int configLuaGcPause                     = 0;  // Lua GC pause %, 0 = leave at the interpreter default
 unsigned int configLuaGcStepMul                   = 0;  // Lua GC step multiplier %, 0 = leave at the default
 #ifdef HANDHELD
