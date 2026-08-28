@@ -80,6 +80,7 @@ extern unsigned int configLuaGcStepMul;
 #ifdef HANDHELD
 extern unsigned int configHandheldResW;
 extern unsigned int configHandheldResH;
+extern bool         configHandheldHidef;
 #endif
 // sound settings
 extern unsigned int configMasterVolume;

@@ -252,6 +252,15 @@ static void gfx_opengl_handheld_ensure_fbo(uint32_t window_w, uint32_t window_h)
     uint32_t target_w = configHandheldResW ? configHandheldResW : HANDHELD_FBO_DEFAULT_WIDTH;
     uint32_t target_h = configHandheldResH ? configHandheldResH : HANDHELD_FBO_DEFAULT_HEIGHT;
 
+    // Hi-Def mode: skip the low-res upscale FBO entirely and render the 3D
+    // world straight to the window at its native resolution. The HUD pass and
+    // blit are both no-ops in this state, so this is a live toggle.
+    if (configHandheldHidef) {
+        gfx_opengl_handheld_destroy_fbo();
+        sHandheldFboReady = false;
+        return;
+    }
+
     if (sHandheldFboReady && sHandheldFboWindowW == window_w && sHandheldFboWindowH == window_h
         && sHandheldFboW == target_w && sHandheldFboH == target_h) {
         return;

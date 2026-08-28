@@ -140,6 +140,7 @@ unsigned int configLuaGcStepMul                   = 0;  // Lua GC step multiplie
 #ifdef HANDHELD
 unsigned int configHandheldResW                   = 0; // internal render width; 0 = use built-in default
 unsigned int configHandheldResH                   = 0; // internal render height; 0 = use built-in default
+bool         configHandheldHidef                  = false; // render 3D + soft shadows at native res
 #endif
 // sound settings
 unsigned int configMasterVolume                   = 80; // 0 - MAX_VOLUME
@@ -348,6 +349,7 @@ static const struct ConfigOption options[] = {
 #ifdef HANDHELD
     {.name = "handheld_res_w",                 .type = CONFIG_TYPE_UINT, .uintValue = &configHandheldResW},
     {.name = "handheld_res_h",                 .type = CONFIG_TYPE_UINT, .uintValue = &configHandheldResH},
+    {.name = "handheld_hidef",                 .type = CONFIG_TYPE_BOOL, .boolValue = &configHandheldHidef},
 #endif
     // sound settings
     {.name = "master_volume",                  .type = CONFIG_TYPE_UINT, .uintValue = &configMasterVolume},

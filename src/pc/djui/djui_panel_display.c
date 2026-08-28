@@ -72,6 +72,10 @@ void djui_panel_display_create(struct DjuiBase* caller) {
         djui_checkbox_create(body, DLANG(DISPLAY, SHOW_FPS), &configShowFPS, NULL);
         djui_checkbox_create(body, DLANG(DISPLAY, VSYNC), &configWindow.vsync, djui_panel_display_apply);
 
+#ifdef HANDHELD
+        djui_checkbox_create(body, DLANG(DISPLAY, HIDEF), &configHandheldHidef, NULL);
+#endif
+
         if (GAPI_MAX > 1) {
             char* gfxBackendChoices[2] = {
                 "OpenGL",

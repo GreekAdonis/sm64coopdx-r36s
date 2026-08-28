@@ -13,6 +13,9 @@
 #include "shadow.h"
 #include "sm64.h"
 #include "game/hardcoded.h"
+#ifdef HANDHELD
+#include "pc/configfile.h"
+#endif
 
 // Avoid Z-fighting
 #define find_floor_height_and_data 0.4 + find_floor_height_and_data
@@ -410,6 +413,9 @@ void calculate_vertex_xyz(s8 index, struct Shadow s, f32 *xPosVtx, f32 *yPosVtx,
     f32 halfTiltedScale;
     s8 xCoordUnit;
     s8 zCoordUnit;
+#ifdef HANDHELD
+    struct FloorGeometry *dummy = NULL;
+#endif
 
     // This makes xCoordUnit and yCoordUnit each one of -1, 0, or 1.
     get_vertex_coords(index, shadowVertexType, &xCoordUnit, &zCoordUnit);
@@ -423,7 +429,18 @@ void calculate_vertex_xyz(s8 index, struct Shadow s, f32 *xPosVtx, f32 *yPosVtx,
     if (gShadowAboveWaterOrLava) {
         *yPosVtx = s.floorHeight;
     } else {
-        *yPosVtx = extrapolate_vertex_y_position(s, *xPosVtx, *zPosVtx);
+#ifdef HANDHELD
+        // Hi-Def mode re-samples the floor under each 9-vertex corner so the
+        // soft-edge alpha fade below can soften the shadow across floor-triangle
+        // seams. This is the per-corner raycast that was stripped for perf; it
+        // only runs when the Hi-Def toggle is on.
+        if (configHandheldHidef && shadowVertexType == SHADOW_WITH_9_VERTS) {
+            *yPosVtx = find_floor_height_and_data(*xPosVtx, s.parentY + 1, *zPosVtx, &dummy);
+        } else
+#endif
+        {
+            *yPosVtx = extrapolate_vertex_y_position(s, *xPosVtx, *zPosVtx);
+        }
     }
 }
 
@@ -440,6 +457,20 @@ void make_shadow_vertex(Vtx *vertices, s8 index, struct Shadow s, s8 shadowVerte
     }
 
     calculate_vertex_xyz(index, s, &xPosVtx, &yPosVtx, &zPosVtx, shadowVertexType);
+
+#ifdef HANDHELD
+    // Hi-Def mode: soften the shadow's alpha where a 9-vertex corner lands on a
+    // differently-angled floor triangle. `diff` is the gap between the per-corner
+    // floor sample (set above) and the flat extrapolation; the position is
+    // snapped back to the extrapolated value so only the solidity is affected.
+    if (configHandheldHidef && shadowVertexType == SHADOW_WITH_9_VERTS) {
+        f32 oldYPosVtx = yPosVtx;
+        yPosVtx = extrapolate_vertex_y_position(s, xPosVtx, zPosVtx);
+        f32 diff = fabs(oldYPosVtx - yPosVtx) / 5.0f;
+        if (diff > 1) { diff = 1; }
+        solidity = 200 * (1.0f - diff);
+    }
+#endif
 
     relX = xPosVtx - s.parentX;
     relY = yPosVtx - s.parentY;
